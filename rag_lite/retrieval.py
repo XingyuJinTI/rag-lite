@@ -378,6 +378,73 @@ def keyword_similarity(
         raise ValueError(f"Unknown keyword method: {method}")
 
 
+def reciprocal_rank_fusion(
+    ranked_lists: List[List[Tuple[str, float]]],
+    k: int = 60
+) -> List[Tuple[str, float]]:
+    """
+    Combine multiple ranked lists using Reciprocal Rank Fusion (RRF).
+    
+    RRF is a robust rank aggregation method that doesn't require score normalization.
+    
+    Formula: RRF_score(d) = Σ 1/(k + rank_i(d))
+    
+    Args:
+        ranked_lists: List of ranked result lists, each containing (chunk, score) tuples
+                     Results should be sorted by score descending (best first)
+        k: Ranking constant (default 60, standard value from original RRF paper)
+        
+    Returns:
+        List of (chunk, rrf_score) tuples, sorted by RRF score descending
+    """
+    rrf_scores: Dict[str, float] = {}
+    
+    for ranked_list in ranked_lists:
+        for rank, (chunk, _) in enumerate(ranked_list, start=1):
+            if chunk not in rrf_scores:
+                rrf_scores[chunk] = 0.0
+            rrf_scores[chunk] += 1.0 / (k + rank)
+    
+    # Sort by RRF score descending
+    results = [(chunk, score) for chunk, score in rrf_scores.items()]
+    results.sort(key=lambda x: x[1], reverse=True)
+    
+    return results
+
+
+def retrieve_keyword_ranked(
+    query: str,
+    corpus: List[str],
+    top_k: int = 100,
+    method: KeywordMethod = KeywordMethod.BM25,
+    k1: float = 1.5,
+    b: float = 0.75
+) -> List[Tuple[str, float]]:
+    """
+    Retrieve documents using keyword search only, returning ranked results.
+    
+    Args:
+        query: Search query
+        corpus: List of document texts
+        top_k: Number of top results to return
+        method: Keyword scoring method (BM25, TFIDF, JACCARD)
+        k1: BM25 k1 parameter
+        b: BM25 b parameter
+        
+    Returns:
+        List of (chunk, score) tuples sorted by score descending
+    """
+    # Initialize scorer with corpus statistics
+    scorer = KeywordScorer(corpus=corpus, method=method, k1=k1, b=b)
+    
+    # Score all documents
+    scored = [(chunk, scorer.score(query, chunk)) for chunk in corpus]
+    
+    # Sort by score descending and return top_k
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:top_k]
+
+
 def expand_query(
     query: str, 
     language_model: str, 
@@ -854,3 +921,100 @@ def retrieve(
     else:
         # Reranking disabled, return top candidates directly
         return [(chunk, score) for chunk, score, _ in top_candidates[:top_n]]
+
+
+def retrieve_hybrid_rrf(
+    query: str,
+    vector_db,  # VectorDB instance with search() method
+    language_model: str,
+    top_n: int = 3,
+    retrieve_k: int = 50,
+    fusion_k: int = 20,
+    use_reranking: bool = False,
+    keyword_method: KeywordMethod = KeywordMethod.BM25,
+    bm25_k1: float = 1.5,
+    bm25_b: float = 0.75,
+    rrf_k: int = 60,
+    rerank_weight: float = 0.8,
+    original_score_weight: float = 0.2,
+) -> List[Tuple[str, float]]:
+    """
+    Retrieve relevant chunks using RRF-based hybrid search.
+    
+    This method:
+    1. Uses ChromaDB's native HNSW search for semantic ranking (fast, O(log n))
+    2. Uses BM25 for keyword ranking (scans corpus)
+    3. Fuses both rankings using Reciprocal Rank Fusion (RRF)
+    4. Optionally reranks with LLM
+    
+    RRF advantages over weighted scoring:
+    - No need to tune weights
+    - Robust to different score distributions
+    - Proven in production (Elasticsearch, etc.)
+    
+    Args:
+        query: User query
+        vector_db: VectorDB instance with search() and get_all() methods
+        language_model: Name of the language model for reranking
+        top_n: Final number of results to return
+        retrieve_k: Number of candidates from each search method (semantic/keyword)
+        fusion_k: Number of candidates after RRF fusion (rerank pool)
+        use_reranking: Whether to use LLM-based reranking
+        keyword_method: Method for keyword scoring (BM25, TFIDF, JACCARD)
+        bm25_k1: BM25 k1 parameter
+        bm25_b: BM25 b parameter
+        rrf_k: RRF constant (default 60)
+        rerank_weight: Weight for rerank score if reranking enabled
+        original_score_weight: Weight for original score if reranking enabled
+        
+    Returns:
+        List of (chunk, score) tuples, sorted by score descending
+    """
+    # Step 1: Semantic search using ChromaDB's native HNSW (fast)
+    logger.debug(f"Running semantic search for: {query[:50]}...")
+    semantic_results = vector_db.search(query, n_results=retrieve_k)
+    logger.debug(f"Semantic search returned {len(semantic_results)} results")
+    
+    # Step 2: Keyword search using BM25 (scans corpus)
+    logger.debug(f"Running keyword search with {keyword_method.value}...")
+    all_docs = vector_db.get_all()
+    corpus = [chunk for chunk, _ in all_docs]
+    
+    keyword_results = retrieve_keyword_ranked(
+        query=query,
+        corpus=corpus,
+        top_k=retrieve_k,
+        method=keyword_method,
+        k1=bm25_k1,
+        b=bm25_b
+    )
+    logger.debug(f"Keyword search returned {len(keyword_results)} results")
+    
+    # Step 3: Fuse with RRF
+    fused_results = reciprocal_rank_fusion(
+        ranked_lists=[semantic_results, keyword_results],
+        k=rrf_k
+    )
+    logger.debug(f"RRF fusion produced {len(fused_results)} unique results")
+    
+    # Step 4: Take top candidates for potential reranking
+    top_candidates = fused_results[:fusion_k]
+    
+    # Step 5: Optional LLM reranking
+    if use_reranking and len(top_candidates) > top_n:
+        logger.debug(f"Reranking top {len(top_candidates)} candidates...")
+        # Convert to format expected by rerank_with_llm: (chunk, combined_score, semantic_score)
+        # Use RRF score as both combined and semantic score
+        candidates_for_rerank = [
+            (chunk, score, score) for chunk, score in top_candidates
+        ]
+        reranked = rerank_with_llm(
+            query,
+            candidates_for_rerank,
+            language_model,
+            rerank_weight,
+            original_score_weight
+        )
+        return reranked[:top_n]
+    
+    return top_candidates[:top_n]

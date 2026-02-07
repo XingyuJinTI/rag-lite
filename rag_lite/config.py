@@ -82,13 +82,33 @@ class ModelConfig:
 
 
 @dataclass
+class StorageConfig:
+    """Configuration for vector storage."""
+    persist_directory: str = "./chroma_db"
+    collection_name: str = "rag_lite"
+
+    @classmethod
+    def from_env(cls) -> "StorageConfig":
+        """Create StorageConfig from environment variables."""
+        return cls(
+            persist_directory=_get_env_str("CHROMA_PERSIST_DIR", cls.persist_directory),
+            collection_name=_get_env_str("CHROMA_COLLECTION", cls.collection_name),
+        )
+
+
+@dataclass
 class RetrievalConfig:
     """Configuration for retrieval parameters."""
     top_n: int = 3
-    retrieve_k: int = 20
+    retrieve_k: int = 50  # Candidates from each search method (semantic/keyword)
+    fusion_k: int = 20    # Candidates after RRF fusion (rerank pool)
     use_reranking: bool = False
     use_hybrid_search: bool = True
     use_query_expansion: bool = False
+    # RRF (Reciprocal Rank Fusion) - recommended for hybrid search
+    use_rrf: bool = True  # Use RRF fusion instead of weighted scoring
+    rrf_k: int = 60  # RRF constant (standard value from original paper)
+    # Legacy weighted scoring (used when use_rrf=False)
     semantic_weight: float = 0.7
     keyword_weight: float = 0.3
     rerank_weight: float = 0.8
@@ -105,9 +125,12 @@ class RetrievalConfig:
         return cls(
             top_n=_get_env_int("RETRIEVE_TOP_N", cls.top_n),
             retrieve_k=_get_env_int("RETRIEVE_K", cls.retrieve_k),
+            fusion_k=_get_env_int("FUSION_K", cls.fusion_k),
             use_reranking=_get_env_bool("USE_RERANKING", cls.use_reranking),
             use_hybrid_search=_get_env_bool("USE_HYBRID_SEARCH", cls.use_hybrid_search),
             use_query_expansion=_get_env_bool("USE_QUERY_EXPANSION", cls.use_query_expansion),
+            use_rrf=_get_env_bool("USE_RRF", cls.use_rrf),
+            rrf_k=_get_env_int("RRF_K", cls.rrf_k),
             semantic_weight=_get_env_float("SEMANTIC_WEIGHT", cls.semantic_weight),
             keyword_weight=_get_env_float("KEYWORD_WEIGHT", cls.keyword_weight),
             rerank_weight=_get_env_float("RERANK_WEIGHT", cls.rerank_weight),
@@ -129,6 +152,7 @@ class Config:
     """
     model: ModelConfig
     retrieval: RetrievalConfig
+    storage: StorageConfig
     data_file: str = "cat-facts.txt"
     ollama_base_url: Optional[str] = None
 
@@ -142,6 +166,7 @@ class Config:
         return cls(
             model=ModelConfig.from_env(),
             retrieval=RetrievalConfig.from_env(),
+            storage=StorageConfig.from_env(),
             data_file=_get_env_str("DATA_FILE", cls.data_file),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL"),  # None is valid, so no default
         )
@@ -156,4 +181,5 @@ class Config:
         return cls(
             model=ModelConfig(),
             retrieval=RetrievalConfig(),
+            storage=StorageConfig(),
         )
