@@ -122,7 +122,14 @@ class RetrievalConfig:
 
 @dataclass
 class Config:
-    """Main configuration class."""
+    """
+    Main configuration class for RAG-Lite.
+    
+    Example:
+        >>> config = Config.default()
+        >>> config.retrieval.use_hybrid_search = False  # Semantic only
+        >>> pipeline = RAGPipeline(config)
+    """
     model: ModelConfig
     retrieval: RetrievalConfig
     storage: StorageConfig
@@ -148,3 +155,17 @@ class Config:
             retrieval=RetrievalConfig(),
             storage=StorageConfig(),
         )
+    
+    @classmethod
+    def semantic_only(cls) -> "Config":
+        """Create configuration with semantic search only (no BM25)."""
+        config = cls.default()
+        config.retrieval.use_hybrid_search = False
+        return config
+    
+    @classmethod
+    def with_reranking(cls) -> "Config":
+        """Create configuration with reranking enabled."""
+        config = cls.default()
+        config.retrieval.use_reranking = True
+        return config

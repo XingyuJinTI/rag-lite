@@ -19,6 +19,17 @@ if requirements_file.exists():
         if line.strip() and not line.startswith("#")
     ]
 
+# Core requirements (without optional evaluation dependencies)
+core_requirements = [
+    "ollama>=0.1.0",
+    "chromadb>=1.0.0",
+]
+
+# Optional evaluation requirements
+eval_requirements = [
+    "datasets>=2.14.0",
+]
+
 setup(
     name="rag-lite",
     version="0.1.0",
@@ -28,8 +39,12 @@ setup(
     author="Eddie J.",
     author_email="jinxingyu95@gmail.com",
     url="https://github.com/XingyuJinTI/rag-lite",
-    packages=find_packages(),
-    install_requires=requirements,
+    packages=find_packages(exclude=["tests", "tests.*"]),
+    install_requires=core_requirements,
+    extras_require={
+        "eval": eval_requirements,
+        "all": eval_requirements,
+    },
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [
@@ -45,5 +60,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
 )
