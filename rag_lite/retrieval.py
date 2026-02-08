@@ -497,19 +497,10 @@ def retrieve(
     logger.debug(f"Semantic: {len(semantic_results)} results")
     
     if use_hybrid_search:
-        # Step 2: BM25 keyword search
-        logger.debug("BM25 keyword search...")
-        all_docs = vector_db.get_all()
-        corpus = [chunk for chunk, _ in all_docs]
-        
-        keyword_results = retrieve_bm25(
-            query=query,
-            corpus=corpus,
-            top_k=retrieve_k,
-            k1=bm25_k1,
-            b=bm25_b
-        )
-        logger.debug(f"BM25: {len(keyword_results)} results")
+        # Step 2: FTS5 keyword search (fast, uses pre-built index)
+        logger.debug("FTS5 keyword search...")
+        keyword_results = vector_db.search_fts(query=query, n_results=retrieve_k)
+        logger.debug(f"FTS5: {len(keyword_results)} results")
         
         # Step 3: RRF fusion (weighted: semantic gets rrf_weight, BM25 gets 1-rrf_weight)
         fused_results = reciprocal_rank_fusion(

@@ -3,9 +3,13 @@ Vector database implementation using ChromaDB for persistent storage.
 
 This module provides a ChromaDB-backed vector database for storing document chunks
 and their corresponding embeddings with automatic persistence.
+
+Also includes SQLite FTS5 for fast full-text keyword search with BM25 ranking.
 """
 
 import logging
+import os
+import sqlite3
 from typing import List, Tuple, Optional
 import hashlib
 
@@ -68,11 +72,95 @@ class VectorDB:
             metadata={"hnsw:space": "cosine"}  # Use cosine similarity
         )
         
+        # Initialize FTS5 for keyword search
+        self._fts_db_path = os.path.join(persist_directory, f"{collection_name}_fts.db")
+        self._init_fts()
+        
+        # Check if FTS index needs rebuilding (out of sync with ChromaDB)
+        self._sync_fts_if_needed()
+        
         logger.info(
             f"Initialized ChromaDB at '{persist_directory}' "
             f"with collection '{collection_name}' ({self._collection.count()} documents)"
         )
 
+    def _init_fts(self) -> None:
+        """Initialize SQLite FTS5 database for keyword search."""
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        
+        # Create FTS5 virtual table with BM25 support
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                chunk_id,
+                content,
+                tokenize='porter unicode61'
+            )
+        """)
+        
+        # Create a regular table to track indexed chunks
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS indexed_chunks (
+                chunk_id TEXT PRIMARY KEY
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+    
+    def _sync_fts_if_needed(self) -> None:
+        """Check if FTS index is in sync with ChromaDB and rebuild if needed."""
+        chroma_count = self._collection.count()
+        
+        if chroma_count == 0:
+            return
+        
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM indexed_chunks")
+        fts_count = cursor.fetchone()[0]
+        conn.close()
+        
+        # If counts differ significantly, rebuild
+        if fts_count < chroma_count * 0.9:  # Allow 10% tolerance
+            logger.info(f"FTS index out of sync ({fts_count} vs {chroma_count}), rebuilding...")
+            self.rebuild_fts_index(show_progress=True)
+    
+    def _add_to_fts(self, chunk_ids: List[str], chunks: List[str]) -> None:
+        """Add chunks to FTS5 index."""
+        if not chunk_ids:
+            return
+            
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        
+        # Check which chunks are already indexed
+        placeholders = ','.join('?' * len(chunk_ids))
+        cursor.execute(
+            f"SELECT chunk_id FROM indexed_chunks WHERE chunk_id IN ({placeholders})",
+            chunk_ids
+        )
+        existing = {row[0] for row in cursor.fetchall()}
+        
+        # Insert only new chunks
+        new_data = [
+            (cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
+            if cid not in existing
+        ]
+        
+        if new_data:
+            cursor.executemany(
+                "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
+                new_data
+            )
+            cursor.executemany(
+                "INSERT INTO indexed_chunks (chunk_id) VALUES (?)",
+                [(cid,) for cid, _ in new_data]
+            )
+            conn.commit()
+        
+        conn.close()
+    
     def _generate_id(self, chunk: str) -> str:
         """Generate a deterministic ID for a chunk."""
         return hashlib.sha256(chunk.encode()).hexdigest()[:16]
@@ -125,6 +213,8 @@ class VectorDB:
                 embeddings=[embedding],
                 documents=[chunk]
             )
+            # Also add to FTS5 index
+            self._add_to_fts([chunk_id], [chunk])
         except Exception as e:
             logger.error(f"Failed to add chunk to database: {e}")
             raise
@@ -188,6 +278,9 @@ class VectorDB:
                     documents=batch_chunks
                 )
                 
+                # Also add to FTS5 index
+                self._add_to_fts(batch_ids, batch_chunks)
+                
                 if show_progress:
                     processed = min(i + batch_size, total)
                     logger.info(f"Added chunks {processed}/{total} to the database")
@@ -243,18 +336,151 @@ class VectorDB:
         
         return list(zip(chunks, similarities))
 
+    def search_fts(
+        self,
+        query: str,
+        n_results: int = 50
+    ) -> List[Tuple[str, float]]:
+        """
+        Search for chunks using FTS5 full-text search with BM25 ranking.
+        
+        This is much faster than in-memory BM25 as the index is pre-built.
+        
+        Args:
+            query: Search query (supports FTS5 syntax like AND, OR, NOT, "phrases")
+            n_results: Maximum number of results to return
+            
+        Returns:
+            List of (chunk, bm25_score) tuples sorted by relevance
+        """
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        
+        # Escape special FTS5 characters and build query
+        # Split into words, escape each, join with implicit AND
+        words = query.split()
+        if not words:
+            conn.close()
+            return []
+        
+        # Escape special characters for FTS5
+        escaped_words = []
+        for word in words:
+            # Remove FTS5 special chars, keep alphanumeric
+            clean_word = ''.join(c for c in word if c.isalnum())
+            if clean_word:
+                escaped_words.append(f'"{clean_word}"')
+        
+        if not escaped_words:
+            conn.close()
+            return []
+        
+        # Use OR for better recall (AND is too strict for short queries)
+        fts_query = ' OR '.join(escaped_words)
+        
+        try:
+            # BM25 returns negative scores (more negative = more relevant)
+            # We negate to get positive scores where higher = better
+            cursor.execute("""
+                SELECT content, -bm25(chunks_fts) as score
+                FROM chunks_fts
+                WHERE chunks_fts MATCH ?
+                ORDER BY score DESC
+                LIMIT ?
+            """, (fts_query, n_results))
+            
+            results = [(row[0], row[1]) for row in cursor.fetchall()]
+            
+        except sqlite3.OperationalError as e:
+            # If query syntax is invalid, try simpler approach
+            logger.debug(f"FTS5 query failed: {e}, trying simpler query")
+            simple_query = ' OR '.join(f'"{w}"' for w in words if w.isalnum())
+            if simple_query:
+                cursor.execute("""
+                    SELECT content, -bm25(chunks_fts) as score
+                    FROM chunks_fts
+                    WHERE chunks_fts MATCH ?
+                    ORDER BY score DESC
+                    LIMIT ?
+                """, (simple_query, n_results))
+                results = [(row[0], row[1]) for row in cursor.fetchall()]
+            else:
+                results = []
+        
+        conn.close()
+        
+        # Normalize scores to 0-1 range
+        if results:
+            max_score = max(score for _, score in results) if results else 1.0
+            if max_score > 0:
+                results = [(chunk, score / max_score) for chunk, score in results]
+        
+        return results
+
     def size(self) -> int:
         """Get the number of chunks in the database."""
         return self._collection.count()
 
     def clear(self) -> None:
-        """Clear all data from the collection."""
+        """Clear all data from the collection and FTS index."""
         self._client.delete_collection(self.collection_name)
         self._collection = self._client.create_collection(
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"}
         )
-        logger.info("Vector database cleared")
+        
+        # Clear FTS5 index
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM chunks_fts")
+        cursor.execute("DELETE FROM indexed_chunks")
+        conn.commit()
+        conn.close()
+        
+        logger.info("Vector database and FTS index cleared")
+
+    def rebuild_fts_index(self, show_progress: bool = True) -> None:
+        """
+        Rebuild FTS5 index from ChromaDB data.
+        
+        Useful if FTS index is missing, corrupted, or out of sync.
+        
+        Args:
+            show_progress: Whether to log progress
+        """
+        # Get all documents from ChromaDB (without embeddings for speed)
+        results = self._collection.get(include=['documents'])
+        
+        if not results['documents']:
+            logger.info("No documents to index")
+            return
+        
+        chunks = results['documents']
+        chunk_ids = results['ids']
+        
+        logger.info(f"Rebuilding FTS index for {len(chunks)} documents...")
+        
+        # Clear existing FTS data
+        conn = sqlite3.connect(self._fts_db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM chunks_fts")
+        cursor.execute("DELETE FROM indexed_chunks")
+        conn.commit()
+        conn.close()
+        
+        # Add all chunks in batches
+        batch_size = 500
+        total = len(chunks)
+        for i in range(0, total, batch_size):
+            batch_ids = chunk_ids[i:i + batch_size]
+            batch_chunks = chunks[i:i + batch_size]
+            self._add_to_fts(batch_ids, batch_chunks)
+            
+            if show_progress:
+                processed = min(i + batch_size, total)
+                logger.info(f"FTS indexed {processed}/{total} documents")
+        
+        logger.info("FTS index rebuild complete")
 
     def delete_collection(self) -> None:
         """Delete the entire collection."""
