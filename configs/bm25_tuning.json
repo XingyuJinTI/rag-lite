@@ -1,0 +1,11 @@
+{
+  "description": "BM25 parameter tuning (k1=term saturation, b=length normalization)",
+  "configurations": [
+    {"name": "bm25_default", "bm25_k1": 1.5, "bm25_b": 0.75},
+    {"name": "bm25_low_saturation", "bm25_k1": 0.5, "bm25_b": 0.75},
+    {"name": "bm25_high_saturation", "bm25_k1": 2.5, "bm25_b": 0.75},
+    {"name": "bm25_no_length_norm", "bm25_k1": 1.5, "bm25_b": 0.0},
+    {"name": "bm25_high_length_norm", "bm25_k1": 1.5, "bm25_b": 1.0},
+    {"name": "bm25_aggressive", "bm25_k1": 2.0, "bm25_b": 0.5}
+  ]
+}

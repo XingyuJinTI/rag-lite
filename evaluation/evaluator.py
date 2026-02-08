@@ -78,6 +78,14 @@ class RAGEvaluator:
         max_examples: Optional[int] = None,
         use_hybrid_search: Optional[bool] = None,
         use_reranking: Optional[bool] = None,
+        # Advanced retrieval parameters (passed to pipeline.retrieve())
+        retrieve_k: Optional[int] = None,
+        fusion_k: Optional[int] = None,
+        rrf_k: Optional[int] = None,
+        rrf_weight: Optional[float] = None,
+        bm25_k1: Optional[float] = None,
+        bm25_b: Optional[float] = None,
+        rerank_weight: Optional[float] = None,
     ) -> RetrievalMetrics:
         """
         Run evaluation on the dataset.
@@ -87,6 +95,13 @@ class RAGEvaluator:
             max_examples: Maximum examples to evaluate (None = all)
             use_hybrid_search: Override pipeline's hybrid search setting
             use_reranking: Override pipeline's reranking setting
+            retrieve_k: Candidates from each search method (overrides config)
+            fusion_k: Candidates after RRF fusion (overrides config)
+            rrf_k: RRF constant, higher = more uniform ranking (default 60)
+            rrf_weight: Semantic weight in RRF; BM25 gets 1 - rrf_weight (default 0.7)
+            bm25_k1: BM25 term frequency saturation (default 1.5)
+            bm25_b: BM25 document length normalization (default 0.75)
+            rerank_weight: Weight for rerank score vs original (default 0.6)
             
         Returns:
             RetrievalMetrics with all computed metrics
@@ -99,6 +114,27 @@ class RAGEvaluator:
         
         if max_examples:
             eval_examples = eval_examples[:max_examples]
+        
+        # Build retrieval kwargs (only non-None values)
+        retrieve_kwargs = {}
+        if use_hybrid_search is not None:
+            retrieve_kwargs["use_hybrid_search"] = use_hybrid_search
+        if use_reranking is not None:
+            retrieve_kwargs["use_reranking"] = use_reranking
+        if retrieve_k is not None:
+            retrieve_kwargs["retrieve_k"] = retrieve_k
+        if fusion_k is not None:
+            retrieve_kwargs["fusion_k"] = fusion_k
+        if rrf_k is not None:
+            retrieve_kwargs["rrf_k"] = rrf_k
+        if rrf_weight is not None:
+            retrieve_kwargs["rrf_weight"] = rrf_weight
+        if bm25_k1 is not None:
+            retrieve_kwargs["bm25_k1"] = bm25_k1
+        if bm25_b is not None:
+            retrieve_kwargs["bm25_b"] = bm25_b
+        if rerank_weight is not None:
+            retrieve_kwargs["rerank_weight"] = rerank_weight
         
         # Accumulators
         recall_1 = []
@@ -117,12 +153,11 @@ class RAGEvaluator:
             # Time the retrieval
             start_time = time.time()
             
-            # Retrieve
+            # Retrieve with all configured parameters
             results = self.pipeline.retrieve(
                 query=example.question,
                 top_n=top_k,
-                use_hybrid_search=use_hybrid_search,
-                use_reranking=use_reranking,
+                **retrieve_kwargs,
             )
             
             elapsed_ms = (time.time() - start_time) * 1000
@@ -235,13 +270,41 @@ class RAGEvaluator:
         Compare multiple retrieval configurations.
         
         Args:
-            configurations: List of config dicts with keys like:
-                {"name": "semantic_only", "use_hybrid_search": False}
+            configurations: List of config dicts. Each dict should have a "name" key
+                and any retrieval parameters to override:
+                
+                - use_hybrid_search: bool - Enable/disable hybrid search
+                - use_reranking: bool - Enable/disable LLM reranking
+                - retrieve_k: int - Candidates from each search method
+                - fusion_k: int - Candidates after RRF fusion
+                - rrf_k: int - RRF constant (higher = more uniform ranking)
+                - rrf_weight: float - Semantic weight in RRF (BM25 = 1 - rrf_weight)
+                - bm25_k1: float - BM25 term frequency saturation
+                - bm25_b: float - BM25 document length normalization
+                - rerank_weight: float - Weight for rerank score vs original
+                
             top_k: Number of results to retrieve
             max_examples: Maximum examples to evaluate
             
         Returns:
             Dictionary mapping config names to their metrics
+            
+        Example:
+            >>> # Compare different RRF weights
+            >>> configs = [
+            ...     {"name": "rrf_k=30", "rrf_k": 30},
+            ...     {"name": "rrf_k=60", "rrf_k": 60},
+            ...     {"name": "rrf_k=100", "rrf_k": 100},
+            ... ]
+            >>> results = evaluator.compare_configurations(configs)
+            
+            >>> # Compare semantic vs hybrid with different BM25 tuning
+            >>> configs = [
+            ...     {"name": "semantic_only", "use_hybrid_search": False},
+            ...     {"name": "hybrid_default", "use_hybrid_search": True},
+            ...     {"name": "hybrid_bm25_tuned", "use_hybrid_search": True, "bm25_k1": 2.0, "bm25_b": 0.5},
+            ... ]
+            >>> results = evaluator.compare_configurations(configs)
         """
         results = {}
         

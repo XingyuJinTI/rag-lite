@@ -1,0 +1,10 @@
+{
+  "description": "Sweep RRF constant (k) - higher values give more uniform ranking",
+  "configurations": [
+    {"name": "rrf_k=10", "rrf_k": 10},
+    {"name": "rrf_k=30", "rrf_k": 30},
+    {"name": "rrf_k=60 (default)", "rrf_k": 60},
+    {"name": "rrf_k=100", "rrf_k": 100},
+    {"name": "rrf_k=200", "rrf_k": 200}
+  ]
+}

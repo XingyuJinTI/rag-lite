@@ -1,0 +1,9 @@
+{
+  "description": "Test different candidate pool sizes",
+  "configurations": [
+    {"name": "small_pool", "retrieve_k": 10, "fusion_k": 10},
+    {"name": "default_pool", "retrieve_k": 20, "fusion_k": 20},
+    {"name": "large_pool", "retrieve_k": 50, "fusion_k": 30},
+    {"name": "very_large_pool", "retrieve_k": 100, "fusion_k": 50}
+  ]
+}

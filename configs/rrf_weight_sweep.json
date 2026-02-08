@@ -1,0 +1,11 @@
+{
+  "description": "Sweep RRF weight to find optimal semantic vs BM25 balance",
+  "configurations": [
+    {"name": "all_bm25 (0.0)", "rrf_weight": 0.0},
+    {"name": "bm25_heavy (0.3)", "rrf_weight": 0.3},
+    {"name": "balanced (0.5)", "rrf_weight": 0.5},
+    {"name": "default (0.7)", "rrf_weight": 0.7},
+    {"name": "semantic_heavy (0.9)", "rrf_weight": 0.9},
+    {"name": "all_semantic (1.0)", "rrf_weight": 1.0}
+  ]
+}

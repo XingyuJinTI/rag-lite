@@ -170,8 +170,8 @@ class CUADDataset(BaseDataset):
         max_examples: Optional[int] = None,
         max_eval_examples: int = 100,
         chunk_by_context: bool = True,
-        max_chunk_chars: int = 1500,  # ~375 tokens, safe for 512 token limit
-        chunk_overlap: int = 200,
+        max_chunk_chars: int = 500,  # ~250-333 tokens, safe for 512 token models
+        chunk_overlap: int = 100,
         **kwargs
     ):
         """
@@ -182,7 +182,7 @@ class CUADDataset(BaseDataset):
             max_examples: Maximum number of contract contexts to load (None = all)
             max_eval_examples: Maximum evaluation examples to keep
             chunk_by_context: If True, use CUAD's pre-chunked contexts
-            max_chunk_chars: Maximum characters per chunk (default 1500 ~ 375 tokens)
+            max_chunk_chars: Maximum characters per chunk (default 500 ~ 250-333 tokens)
             chunk_overlap: Overlap between chunks in characters
         """
         super().__init__(name="cuad", **kwargs)

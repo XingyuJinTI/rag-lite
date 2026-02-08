@@ -17,8 +17,20 @@ Usage:
     # Compare retrieval strategies
     python -m evaluation.run_benchmark --compare
     
+    # Compare with config file
+    python -m evaluation.run_benchmark --config-file configs/rrf_sweep.json
+    
     # Quick test with cat facts
     python -m evaluation.run_benchmark --dataset cat_facts --file cat-facts.txt
+
+Config File Format (JSON):
+    {
+      "configurations": [
+        {"name": "semantic_only", "use_hybrid_search": false},
+        {"name": "hybrid_default", "rrf_weight": 0.7},
+        {"name": "bm25_heavy", "rrf_weight": 0.3}
+      ]
+    }
 
 Requirements:
     pip install rag-lite[eval]
@@ -27,9 +39,11 @@ Requirements:
 """
 
 import argparse
+import json
 import logging
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List, Dict
 
 # Setup logging
 logging.basicConfig(
@@ -49,6 +63,68 @@ from evaluation import (
 )
 
 
+def load_config_file(config_path: str) -> List[Dict]:
+    """
+    Load configurations from a JSON file.
+    
+    Expected format:
+        {
+          "configurations": [
+            {"name": "config1", "use_hybrid_search": false},
+            {"name": "config2", "rrf_weight": 0.5},
+            ...
+          ]
+        }
+    
+    Or simply a list:
+        [
+          {"name": "config1", "use_hybrid_search": false},
+          {"name": "config2", "rrf_weight": 0.5}
+        ]
+    
+    Available config parameters:
+        - name: str (required) - Display name for the configuration
+        - use_hybrid_search: bool - Enable BM25 + semantic fusion
+        - use_reranking: bool - Enable LLM reranking
+        - rrf_k: int - RRF constant (higher = more uniform ranking)
+        - rrf_weight: float - Semantic weight (0.0=all BM25, 1.0=all semantic)
+        - retrieve_k: int - Candidates from each search method
+        - fusion_k: int - Candidates after RRF fusion
+        - bm25_k1: float - BM25 term frequency saturation
+        - bm25_b: float - BM25 document length normalization
+        - rerank_weight: float - Weight for rerank vs original score
+    
+    Args:
+        config_path: Path to JSON config file
+        
+    Returns:
+        List of configuration dictionaries
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(path, 'r') as f:
+        data = json.load(f)
+    
+    # Support both {"configurations": [...]} and direct list format
+    if isinstance(data, list):
+        configs = data
+    elif isinstance(data, dict) and "configurations" in data:
+        configs = data["configurations"]
+    else:
+        raise ValueError(
+            "Config file must be a JSON list or object with 'configurations' key"
+        )
+    
+    # Validate each config has a name
+    for i, cfg in enumerate(configs):
+        if "name" not in cfg:
+            cfg["name"] = f"config_{i}"
+    
+    return configs
+
+
 def run_evaluation(
     dataset_name: str = "cuad",
     max_documents: Optional[int] = None,
@@ -56,8 +132,10 @@ def run_evaluation(
     top_k: int = 10,
     file_path: Optional[str] = None,
     compare_configs: bool = False,
+    config_file: Optional[str] = None,
     use_hybrid: bool = True,
     use_reranking: bool = False,
+    interactive: bool = True,
 ):
     """
     Run RAG evaluation on a dataset.
@@ -69,8 +147,10 @@ def run_evaluation(
         top_k: Number of results to retrieve per query
         file_path: File path for cat_facts or custom datasets
         compare_configs: Whether to compare multiple configurations
+        config_file: Path to JSON config file with configurations to compare
         use_hybrid: Enable hybrid search (BM25 + semantic)
         use_reranking: Enable LLM reranking
+        interactive: Run interactive query mode after evaluation
     """
     print("\n" + "=" * 70)
     print("RAG-LITE EVALUATION BENCHMARK")
@@ -142,9 +222,23 @@ def run_evaluation(
     # Create evaluator
     evaluator = RAGEvaluator(pipeline, dataset, verbose=True)
     
-    if compare_configs:
-        # Compare multiple configurations
-        print("\n--- Comparing Retrieval Configurations ---")
+    # Determine configurations to run
+    configurations = None
+    
+    if config_file:
+        # Load configurations from file
+        print(f"\n--- Loading Configurations from: {config_file} ---")
+        try:
+            configurations = load_config_file(config_file)
+            print(f"Loaded {len(configurations)} configurations:")
+            for cfg in configurations:
+                print(f"  - {cfg['name']}: {cfg}")
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+            print(f"Error loading config file: {e}")
+            sys.exit(1)
+    elif compare_configs:
+        # Use default comparison configurations
+        print("\n--- Using Default Comparison Configurations ---")
         configurations = [
             {"name": "semantic_only", "use_hybrid_search": False, "use_reranking": False},
             {"name": "hybrid_bm25+semantic", "use_hybrid_search": True, "use_reranking": False},
@@ -155,7 +249,10 @@ def run_evaluation(
             configurations.append(
                 {"name": "hybrid+reranking", "use_hybrid_search": True, "use_reranking": True}
             )
-        
+    
+    if configurations:
+        # Compare configurations
+        print(f"\n--- Comparing {len(configurations)} Retrieval Configurations ---")
         evaluator.compare_configurations(
             configurations=configurations,
             top_k=top_k,
@@ -175,26 +272,27 @@ def run_evaluation(
         evaluator.print_report(detailed=True)
     
     # Interactive query mode
-    print("\n--- Interactive Query Mode ---")
-    print("Type a question to test retrieval, or 'quit' to exit.\n")
-    
-    while True:
-        try:
-            query = input("Query: ").strip()
-            if query.lower() in ('quit', 'exit', 'q'):
+    if interactive:
+        print("\n--- Interactive Query Mode ---")
+        print("Type a question to test retrieval, or 'quit' to exit.\n")
+        
+        while True:
+            try:
+                query = input("Query: ").strip()
+                if query.lower() in ('quit', 'exit', 'q'):
+                    break
+                if not query:
+                    continue
+                
+                results = pipeline.retrieve(query, top_n=3)
+                print("\nRetrieved chunks:")
+                for i, (chunk, score) in enumerate(results, 1):
+                    print(f"  {i}. (score: {score:.4f}) {chunk[:150]}...")
+                print()
+                
+            except KeyboardInterrupt:
+                print("\n")
                 break
-            if not query:
-                continue
-            
-            results = pipeline.retrieve(query, top_n=3)
-            print("\nRetrieved chunks:")
-            for i, (chunk, score) in enumerate(results, 1):
-                print(f"  {i}. (score: {score:.4f}) {chunk[:150]}...")
-            print()
-            
-        except KeyboardInterrupt:
-            print("\n")
-            break
     
     print("Done!")
 
@@ -211,11 +309,24 @@ Examples:
   # Evaluate SQuAD (reading comprehension)
   python -m evaluation.run_benchmark --dataset squad --max-docs 200 --max-eval 50
   
-  # Compare retrieval configurations
+  # Compare retrieval configurations (default set)
   python -m evaluation.run_benchmark --dataset cuad --compare
+  
+  # Compare with custom config file
+  python -m evaluation.run_benchmark --config-file configs/rrf_sweep.json --max-eval 30
   
   # Quick test with cat facts (no evaluation, just indexing)
   python -m evaluation.run_benchmark --dataset cat_facts --file cat-facts.txt
+
+Config File Format (JSON):
+  {
+    "configurations": [
+      {"name": "semantic_only", "use_hybrid_search": false},
+      {"name": "rrf_0.3", "rrf_weight": 0.3},
+      {"name": "rrf_0.5", "rrf_weight": 0.5},
+      {"name": "rrf_0.7", "rrf_weight": 0.7}
+    ]
+  }
         """
     )
     
@@ -262,6 +373,13 @@ Examples:
     )
     
     parser.add_argument(
+        "--config-file", "-C",
+        type=str,
+        default=None,
+        help="Path to JSON config file with configurations to compare"
+    )
+    
+    parser.add_argument(
         "--no-hybrid",
         action="store_true",
         help="Disable hybrid search (use semantic only)"
@@ -273,6 +391,12 @@ Examples:
         help="Enable LLM reranking"
     )
     
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Skip interactive query mode after evaluation"
+    )
+    
     args = parser.parse_args()
     
     run_evaluation(
@@ -282,8 +406,10 @@ Examples:
         top_k=args.top_k,
         file_path=args.file,
         compare_configs=args.compare,
+        config_file=args.config_file,
         use_hybrid=not args.no_hybrid,
         use_reranking=args.rerank,
+        interactive=not args.no_interactive,
     )
 
 

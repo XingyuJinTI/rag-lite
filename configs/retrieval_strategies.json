@@ -1,0 +1,11 @@
+{
+  "description": "Compare different retrieval strategies",
+  "configurations": [
+    {"name": "semantic_only", "use_hybrid_search": false, "use_reranking": false},
+    {"name": "hybrid_default", "use_hybrid_search": true, "use_reranking": false},
+    {"name": "hybrid_bm25_heavy", "use_hybrid_search": true, "rrf_weight": 0.3},
+    {"name": "hybrid_semantic_heavy", "use_hybrid_search": true, "rrf_weight": 0.9},
+    {"name": "semantic+rerank", "use_hybrid_search": false, "use_reranking": true},
+    {"name": "hybrid+rerank", "use_hybrid_search": true, "use_reranking": true}
+  ]
+}

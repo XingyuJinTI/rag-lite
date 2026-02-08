@@ -70,6 +70,7 @@ class StorageConfig:
     """Configuration for vector storage."""
     persist_directory: str = "./chroma_db"
     collection_name: str = "rag_lite"
+    max_chunk_chars: int = 500  # Safety limit (~250-333 tokens for very dense text)
 
     @classmethod
     def from_env(cls) -> "StorageConfig":
@@ -77,6 +78,7 @@ class StorageConfig:
         return cls(
             persist_directory=_get_env_str("CHROMA_PERSIST_DIR", cls.persist_directory),
             collection_name=_get_env_str("CHROMA_COLLECTION", cls.collection_name),
+            max_chunk_chars=_get_env_int("MAX_CHUNK_CHARS", cls.max_chunk_chars),
         )
 
 
@@ -94,6 +96,7 @@ class RetrievalConfig:
     
     # RRF parameters
     rrf_k: int = 60               # RRF constant (standard value)
+    rrf_weight: float = 0.7       # Semantic weight in RRF; BM25 gets 1 - rrf_weight (0.3)
     
     # Reranking weights
     rerank_weight: float = 0.8
@@ -113,6 +116,7 @@ class RetrievalConfig:
             use_hybrid_search=_get_env_bool("USE_HYBRID_SEARCH", cls.use_hybrid_search),
             use_reranking=_get_env_bool("USE_RERANKING", cls.use_reranking),
             rrf_k=_get_env_int("RRF_K", cls.rrf_k),
+            rrf_weight=_get_env_float("RRF_WEIGHT", cls.rrf_weight),
             rerank_weight=_get_env_float("RERANK_WEIGHT", cls.rerank_weight),
             original_score_weight=_get_env_float("ORIGINAL_SCORE_WEIGHT", cls.original_score_weight),
             bm25_k1=_get_env_float("BM25_K1", cls.bm25_k1),
