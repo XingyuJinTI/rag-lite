@@ -96,10 +96,17 @@ All settings are configured via environment variables:
 # Ensure Ollama is running
 ollama serve
 
-# Run application
+# Default (cat-facts dataset)
 python main.py
-# or
-rag-lite
+
+# RAGQArena Tech dataset (28k+ tech documents)
+python main.py --dataset ragqa
+
+# Custom text file
+python main.py --file path/to/data.txt
+
+# With hybrid search
+python main.py --dataset ragqa --hybrid --rrf-weight 0.7
 ```
 
 **Programmatic:**
