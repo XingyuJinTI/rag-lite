@@ -1,6 +1,7 @@
 # Core dependencies
-ollama>=0.1.0
 chromadb>=1.0.0
+sentence-transformers>=2.2.0  # Fast local embeddings
+ollama>=0.1.0  # For LLM generation
 
 # Optional: For evaluation (install with pip install -e .[eval])
 # requests>=2.25.0

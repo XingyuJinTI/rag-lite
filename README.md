@@ -4,17 +4,19 @@ A lightweight, privacy-first Retrieval-Augmented Generation (RAG) system for kno
 
 ## Overview
 
-RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, running entirely on local infrastructure via Ollama. No data leaves your environment.
+RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, running entirely on local infrastructure. No data leaves your environment.
+
 
 ## Architecture
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌────────────┐
 │ Data Loader │ ──▶ │  Vector DB   │ ──▶ │  Retrieval  │ ──▶ │ Generation │
-└─────────────┘     │  (ChromaDB)  │     └─────────────┘     └────────────┘
-                    └──────────────┘
+└─────────────┘     │  (ChromaDB)  │     └─────────────┘     │  (Ollama)  │
+                    └──────────────┘                         └────────────┘
                            │                    │
-                    Embeddings (BGE)    Hybrid Search + Rerank
+               sentence-transformers    Hybrid Search + Rerank
+                   (BGE embeddings)
 ```
 
 **Components:**
@@ -28,11 +30,15 @@ RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, runnin
 | `rag_pipeline` | Orchestration layer |
 | `config` | Environment-based configuration |
 
+- **Embeddings**: sentence-transformers (fast, local, HuggingFace models)
+- **LLM Generation**: Ollama (local LLM inference)
+
 ## Requirements
 
 - Python 3.8+
-- [Ollama](https://ollama.ai/) running locally
+- [Ollama](https://ollama.ai/) running locally (for LLM generation)
 - 4GB+ RAM (model dependent)
+- ~500MB disk space for embedding model (downloaded on first run)
 
 ## Installation
 
@@ -48,12 +54,13 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-**Pull models:**
+**Pull LLM model:**
 
 ```bash
-ollama pull hf.co/CompendiumLabs/bge-base-en-v1.5-gguf
 ollama pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF
 ```
+
+The embedding model (`BAAI/bge-base-en-v1.5`) is downloaded automatically from HuggingFace on first run.
 
 ## Configuration
 
@@ -63,9 +70,8 @@ All settings are configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_MODEL` | `hf.co/CompendiumLabs/bge-base-en-v1.5-gguf` | Embedding model |
-| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Generation model |
-| `OLLAMA_BASE_URL` | `None` | Custom Ollama endpoint |
+| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | HuggingFace embedding model (sentence-transformers) |
+| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Ollama LLM for generation |
 
 **Storage:**
 
@@ -194,16 +200,17 @@ python -m evaluation.run_benchmark --config-file configs/rrf_weight_sweep.json -
 See [evaluation/README.md](evaluation/README.md) for detailed documentation on datasets, metrics, config files, and CLI options.
 
 **TODO:**
+- [ ] Add proper document chunking (split long docs into overlapping chunks with sentence boundaries)
 - [ ] Add Semantic F1 metric (LLM as a judge)
 - [ ] Add Reranking via cross-encoder, replacing LLM reranker
 - [ ] Compare LLM models
-- [ ] Compare embeding models (via sentence transformer)
+- [ ] Compare embedding models
 
 
 ## Security
 
-- **Local Processing**: All inference via Ollama
-- **No External APIs**: Data stays local
+- **Local Processing**: Embeddings via sentence-transformers, LLM via Ollama
+- **No External APIs**: Data stays local (models downloaded once, cached locally)
 - **Local Persistence**: ChromaDB on local filesystem
 - **Telemetry Disabled**: ChromaDB analytics off
 

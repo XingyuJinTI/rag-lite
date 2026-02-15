@@ -37,7 +37,6 @@ class RAGPipeline:
             embedding_model=config.model.embedding_model,
             persist_directory=config.storage.persist_directory,
             collection_name=config.storage.collection_name,
-            ollama_base_url=config.ollama_base_url,
             max_chunk_chars=config.storage.max_chunk_chars,
         )
 

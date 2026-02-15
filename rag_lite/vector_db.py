@@ -4,6 +4,7 @@ Vector database implementation using ChromaDB for persistent storage.
 This module provides a ChromaDB-backed vector database for storing document chunks
 and their corresponding embeddings with automatic persistence.
 
+Uses sentence-transformers for fast, efficient local embeddings.
 Also includes SQLite FTS5 for fast full-text keyword search with BM25 ranking.
 """
 
@@ -15,7 +16,7 @@ import hashlib
 
 import chromadb
 from chromadb.config import Settings
-import ollama
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class VectorDB:
     """
     ChromaDB-backed vector database for storing document chunks and embeddings.
     
-    Provides persistent storage with automatic embedding generation via Ollama.
+    Provides persistent storage with automatic embedding generation via sentence-transformers.
     Data persists across restarts when using a persist_directory.
     """
 
@@ -38,27 +39,26 @@ class VectorDB:
         embedding_model: str,
         persist_directory: str = "./chroma_db",
         collection_name: str = "rag_lite",
-        ollama_base_url: Optional[str] = None,
         max_chunk_chars: Optional[int] = None
     ):
         """
         Initialize the vector database with ChromaDB backend.
         
         Args:
-            embedding_model: Name of the Ollama embedding model to use
+            embedding_model: HuggingFace model name (e.g., "BAAI/bge-base-en-v1.5")
             persist_directory: Directory for ChromaDB persistence
             collection_name: Name of the ChromaDB collection
-            ollama_base_url: Optional base URL for Ollama API
-            max_chunk_chars: Maximum chars per chunk before truncation (default 800)
+            max_chunk_chars: Maximum chars per chunk before truncation (default 500)
         """
         self.embedding_model = embedding_model
         self.persist_directory = persist_directory
         self.collection_name = collection_name
         self.max_chunk_chars = max_chunk_chars or self.MAX_CHUNK_CHARS
         
-        # Configure Ollama client if base URL is provided
-        if ollama_base_url:
-            ollama.Client(host=ollama_base_url)
+        # Initialize sentence-transformers model
+        logger.info(f"Loading embedding model: {embedding_model}")
+        self._model = SentenceTransformer(embedding_model)
+        logger.info(f"Loaded embedding model with dimension {self._model.get_sentence_embedding_dimension()}")
         
         # Initialize ChromaDB with persistence
         self._client = chromadb.PersistentClient(
@@ -182,14 +182,14 @@ class VectorDB:
     def _get_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text."""
         text = self._truncate_text(text)
-        result = ollama.embed(model=self.embedding_model, input=text)
-        return result['embeddings'][0]
+        embedding = self._model.encode(text, convert_to_numpy=True)
+        return embedding.tolist()
 
     def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts in a single call."""
+        """Generate embeddings for multiple texts in parallel."""
         texts = [self._truncate_text(t) for t in texts]
-        result = ollama.embed(model=self.embedding_model, input=texts)
-        return result['embeddings']
+        embeddings = self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        return embeddings.tolist()
 
     def add_chunk(self, chunk: str) -> None:
         """
@@ -219,7 +219,7 @@ class VectorDB:
             logger.error(f"Failed to add chunk to database: {e}")
             raise
 
-    def add_chunks(self, chunks: List[str], show_progress: bool = True, batch_size: int = 50) -> None:
+    def add_chunks(self, chunks: List[str], show_progress: bool = True, batch_size: int = 256) -> None:
         """
         Add multiple chunks to the database with batch embedding.
         
