@@ -23,6 +23,7 @@ if requirements_file.exists():
 core_requirements = [
     "ollama>=0.1.0",
     "chromadb>=1.0.0",
+    "transformers>=4.30.0",  # For token-based chunking
 ]
 
 # Optional evaluation requirements

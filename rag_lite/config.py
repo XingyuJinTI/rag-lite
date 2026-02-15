@@ -70,7 +70,10 @@ class StorageConfig:
     """Configuration for vector storage."""
     persist_directory: str = "./chroma_db"
     collection_name: str = "rag_lite"
-    max_chunk_chars: int = 500  # Safety limit (~250-333 tokens for very dense text)
+    
+    # Token-based chunking settings (for embedding model context limits)
+    max_tokens: int = 480  # Max tokens per chunk (safe for 512-token models)
+    tokenizer_model: str = "BAAI/bge-base-en-v1.5"  # Tokenizer matching embedding model
 
     @classmethod
     def from_env(cls) -> "StorageConfig":
@@ -78,7 +81,8 @@ class StorageConfig:
         return cls(
             persist_directory=_get_env_str("CHROMA_PERSIST_DIR", cls.persist_directory),
             collection_name=_get_env_str("CHROMA_COLLECTION", cls.collection_name),
-            max_chunk_chars=_get_env_int("MAX_CHUNK_CHARS", cls.max_chunk_chars),
+            max_tokens=_get_env_int("MAX_TOKENS", cls.max_tokens),
+            tokenizer_model=_get_env_str("TOKENIZER_MODEL", cls.tokenizer_model),
         )
 
 

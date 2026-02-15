@@ -38,7 +38,8 @@ class RAGPipeline:
             persist_directory=config.storage.persist_directory,
             collection_name=config.storage.collection_name,
             ollama_base_url=config.ollama_base_url,
-            max_chunk_chars=config.storage.max_chunk_chars,
+            max_tokens=config.storage.max_tokens,
+            tokenizer_model=config.storage.tokenizer_model,
         )
 
     def index_documents(self, documents: List[str], show_progress: bool = True) -> None:

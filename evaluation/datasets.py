@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
+from rag_lite.chunking import TokenChunker
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,8 +172,9 @@ class CUADDataset(BaseDataset):
         max_examples: Optional[int] = None,
         max_eval_examples: int = 100,
         chunk_by_context: bool = True,
-        max_chunk_chars: int = 500,  # ~250-333 tokens, safe for 512 token models
-        chunk_overlap: int = 100,
+        max_tokens: int = 480,  # Safe for 512-token embedding models
+        overlap_tokens: int = 80,
+        tokenizer_model: str = "BAAI/bge-base-en-v1.5",
         **kwargs
     ):
         """
@@ -182,16 +185,29 @@ class CUADDataset(BaseDataset):
             max_examples: Maximum number of contract contexts to load (None = all)
             max_eval_examples: Maximum evaluation examples to keep
             chunk_by_context: If True, use CUAD's pre-chunked contexts
-            max_chunk_chars: Maximum characters per chunk (default 500 ~ 250-333 tokens)
-            chunk_overlap: Overlap between chunks in characters
+            max_tokens: Maximum tokens per chunk (default 480 for 512-token models)
+            overlap_tokens: Token overlap between chunks for context continuity
+            tokenizer_model: HuggingFace tokenizer model name
         """
         super().__init__(name="cuad", **kwargs)
         self.split = split
         self.max_examples = max_examples
         self.max_eval_examples = max_eval_examples
         self.chunk_by_context = chunk_by_context
-        self.max_chunk_chars = max_chunk_chars
-        self.chunk_overlap = chunk_overlap
+        self.max_tokens = max_tokens
+        self.overlap_tokens = overlap_tokens
+        self.tokenizer_model = tokenizer_model
+        self._chunker = None  # Lazy init
+    
+    def _get_chunker(self) -> TokenChunker:
+        """Get or create the token chunker."""
+        if self._chunker is None:
+            self._chunker = TokenChunker(
+                model_name=self.tokenizer_model,
+                max_tokens=self.max_tokens,
+                overlap_tokens=self.overlap_tokens,
+            )
+        return self._chunker
     
     def load(self) -> "CUADDataset":
         """Load CUAD dataset from HuggingFace."""
@@ -279,16 +295,20 @@ class CUADDataset(BaseDataset):
                 )
                 context_to_questions[context].append(qa)
         
-        # Store documents - chunk long ones for embedding model compatibility
+        # Store documents - chunk using token-aware chunking for embedding model compatibility
         raw_docs = list(context_to_doc.values())
         self.documents = []
         
+        # Initialize token chunker
+        chunker = self._get_chunker()
+        
         for doc in raw_docs:
-            if len(doc.text) <= self.max_chunk_chars:
+            # Use token count to decide if chunking is needed
+            if chunker.token_count(doc.text) <= self.max_tokens:
                 self.documents.append(doc)
             else:
-                # Chunk long documents
-                chunks = self._chunk_text(doc.text, self.max_chunk_chars, self.chunk_overlap)
+                # Chunk long documents using token-aware chunker
+                chunks = chunker.chunk_text(doc.text)
                 for idx, chunk_text in enumerate(chunks):
                     self.documents.append(Document(
                         text=chunk_text,
@@ -296,7 +316,7 @@ class CUADDataset(BaseDataset):
                         metadata={**doc.metadata, "parent_id": doc.doc_id, "chunk_idx": idx}
                     ))
         
-        logger.info(f"Chunked {len(raw_docs)} contexts into {len(self.documents)} chunks")
+        logger.info(f"Chunked {len(raw_docs)} contexts into {len(self.documents)} chunks (token-based)")
         
         # Collect all Q&A examples (limit to max_eval_examples)
         all_examples = []

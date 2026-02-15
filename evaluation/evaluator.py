@@ -48,7 +48,8 @@ class RAGEvaluator:
         pipeline,  # RAGPipeline instance
         dataset: BaseDataset,
         match_threshold: float = 0.5,
-        verbose: bool = True
+        verbose: bool = True,
+        debug: bool = False,
     ):
         """
         Initialize evaluator.
@@ -58,19 +59,29 @@ class RAGEvaluator:
             dataset: Dataset with evaluation examples
             match_threshold: Minimum text overlap for a match
             verbose: Print progress during evaluation
+            debug: Print detailed matching info for first few queries
         """
         self.pipeline = pipeline
         self.dataset = dataset
         self.match_threshold = match_threshold
         self.verbose = verbose
+        self.debug = debug
         self.metrics: Optional[RetrievalMetrics] = None
         
         # Custom match function with configurable threshold
+        # Note: For large contexts, we check if chunk is substring of context
+        # or if there's significant word overlap
         self.match_fn = lambda r, g: (
             normalize_text(g) in normalize_text(r) or 
             normalize_text(r) in normalize_text(g) or
             text_overlap_score(r, g) > self.match_threshold
         )
+    
+    def _answer_based_match(self, retrieved: str, answer: str) -> bool:
+        """Check if the answer text appears in the retrieved chunk."""
+        if not answer:
+            return False
+        return normalize_text(answer) in normalize_text(retrieved)
     
     def evaluate(
         self,
@@ -166,14 +177,56 @@ class RAGEvaluator:
             # Extract chunk texts
             retrieved_chunks = [chunk for chunk, _ in results]
             ground_truth = example.context
+            answer_text = example.answer if hasattr(example, 'answer') else ""
             
-            # Calculate metrics for this query
-            r1 = calculate_recall_at_k(retrieved_chunks, ground_truth, 1, self.match_fn)
-            r3 = calculate_recall_at_k(retrieved_chunks, ground_truth, 3, self.match_fn)
-            r5 = calculate_recall_at_k(retrieved_chunks, ground_truth, 5, self.match_fn)
-            r10 = calculate_recall_at_k(retrieved_chunks, ground_truth, min(10, top_k), self.match_fn)
-            mrr = calculate_mrr(retrieved_chunks, ground_truth, self.match_fn)
-            ndcg = calculate_ndcg_at_k(retrieved_chunks, ground_truth, min(10, top_k), self.match_fn)
+            # Use answer-based matching: does the answer appear in the retrieved chunk?
+            # This is more precise than context matching for retrieval evaluation
+            if answer_text:
+                answer_match_fn = lambda r, g: normalize_text(answer_text) in normalize_text(r)
+            else:
+                answer_match_fn = self.match_fn
+            
+            # Debug: show what's being compared for first few queries
+            if self.debug and i < 2:
+                print(f"\n--- DEBUG Query {i+1} ---")
+                print(f"Question: {example.question[:100]}...")
+                print(f"Answer: {answer_text[:150]}..." if answer_text else "Answer: N/A")
+                print(f"Context size: {len(ground_truth)} chars")
+                print(f"Top retrieved ({len(retrieved_chunks[0]) if retrieved_chunks else 0} chars): {retrieved_chunks[0][:200] if retrieved_chunks else 'None'}...")
+                if retrieved_chunks and answer_text:
+                    answer_found = normalize_text(answer_text) in normalize_text(retrieved_chunks[0])
+                    print(f"Answer in top chunk: {answer_found}")
+                    # Check all top 10
+                    for j, chunk in enumerate(retrieved_chunks[:10]):
+                        if normalize_text(answer_text) in normalize_text(chunk):
+                            print(f"Answer found in chunk #{j+1}!")
+                            break
+                    else:
+                        print("Answer NOT found in top 10 chunks")
+                   
+                    # Check what rank the correct answer would be at
+                    print("Finding actual rank of correct answer...")
+                    # Retrieve more candidates to find the answer
+                    large_results = self.pipeline.retrieve(
+                        query=example.question,
+                        top_n=500,  # Get more candidates
+                        retrieve_k=500,
+                    )
+                    answer_norm = normalize_text(answer_text)
+                    for rank, (chunk, score) in enumerate(large_results, 1):
+                        if answer_norm in normalize_text(chunk):
+                            print(f"Answer found at RANK {rank} (score: {score:.4f})")
+                            break
+                    else:
+                        print("Answer not in top 500 retrieved!")
+            
+            # Calculate metrics using answer-based matching
+            r1 = calculate_recall_at_k(retrieved_chunks, ground_truth, 1, answer_match_fn)
+            r3 = calculate_recall_at_k(retrieved_chunks, ground_truth, 3, answer_match_fn)
+            r5 = calculate_recall_at_k(retrieved_chunks, ground_truth, 5, answer_match_fn)
+            r10 = calculate_recall_at_k(retrieved_chunks, ground_truth, min(10, top_k), answer_match_fn)
+            mrr = calculate_mrr(retrieved_chunks, ground_truth, answer_match_fn)
+            ndcg = calculate_ndcg_at_k(retrieved_chunks, ground_truth, min(10, top_k), answer_match_fn)
             
             recall_1.append(r1)
             recall_3.append(r3)

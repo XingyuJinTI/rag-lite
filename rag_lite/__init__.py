@@ -27,6 +27,7 @@ __version__ = "0.1.0"
 from .config import Config, ModelConfig, RetrievalConfig, StorageConfig
 from .rag_pipeline import RAGPipeline
 from .data_loader import load_text_file
+from .chunking import TokenChunker, guardrail_texts, count_tokens
 
 __all__ = [
     # Config
@@ -38,4 +39,8 @@ __all__ = [
     "RAGPipeline",
     # Data loading
     "load_text_file",
+    # Chunking
+    "TokenChunker",
+    "guardrail_texts",
+    "count_tokens",
 ]

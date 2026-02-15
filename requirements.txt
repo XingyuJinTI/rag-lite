@@ -1,6 +1,7 @@
 # Core dependencies
 ollama>=0.1.0
 chromadb>=1.0.0
+transformers>=4.30.0  # For token-based chunking
 
 # Optional: For evaluation (install with pip install -e .[eval])
 # datasets>=2.14.0

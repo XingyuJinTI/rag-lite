@@ -77,7 +77,12 @@ def text_overlap_score(retrieved: str, ground_truth: str, threshold: float = 0.5
     """
     Calculate text overlap between retrieved and ground truth.
     
-    Uses token overlap (Jaccard-like) for fuzzy matching.
+    Uses coverage-based matching that handles asymmetric sizes well.
+    Returns the max of:
+    - What fraction of retrieved tokens appear in ground truth
+    - What fraction of ground truth tokens appear in retrieved
+    
+    This works better than Jaccard when chunk << context or vice versa.
     
     Args:
         retrieved: Retrieved text
@@ -90,16 +95,18 @@ def text_overlap_score(retrieved: str, ground_truth: str, threshold: float = 0.5
     retrieved_tokens = set(normalize_text(retrieved).split())
     truth_tokens = set(normalize_text(ground_truth).split())
     
-    if not truth_tokens:
+    if not truth_tokens or not retrieved_tokens:
         return 0.0
     
     intersection = len(retrieved_tokens & truth_tokens)
-    union = len(retrieved_tokens | truth_tokens)
     
-    if union == 0:
-        return 0.0
+    # Coverage: what % of the smaller set is covered?
+    # This handles cases where chunk is subset of context (or vice versa)
+    coverage_of_retrieved = intersection / len(retrieved_tokens)
+    coverage_of_truth = intersection / len(truth_tokens)
     
-    return intersection / union
+    # Return max coverage - if either text is well-covered, it's a match
+    return max(coverage_of_retrieved, coverage_of_truth)
 
 
 def answer_in_context(answer: str, context: str) -> bool:

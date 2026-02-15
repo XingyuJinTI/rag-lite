@@ -16,6 +16,9 @@ import hashlib
 import chromadb
 from chromadb.config import Settings
 import ollama
+from ollama._types import ResponseError
+
+from .chunking import TokenChunker, guardrail_texts
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +31,9 @@ class VectorDB:
     Data persists across restarts when using a persist_directory.
     """
 
-    # Safety limit for embedding models (chars). 
-    # Very dense text (legal, code): ~1.5-2 chars/token
-    # 500 chars ~= 250-333 tokens, definitely fits 512 token models.
-    MAX_CHUNK_CHARS = 500
+    # Token limits for embedding models
+    DEFAULT_MAX_TOKENS = 480  # Safe for 512-token models with headroom
+    DEFAULT_TOKENIZER = "BAAI/bge-base-en-v1.5"
 
     def __init__(
         self,
@@ -39,7 +41,8 @@ class VectorDB:
         persist_directory: str = "./chroma_db",
         collection_name: str = "rag_lite",
         ollama_base_url: Optional[str] = None,
-        max_chunk_chars: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        tokenizer_model: Optional[str] = None,
     ):
         """
         Initialize the vector database with ChromaDB backend.
@@ -49,12 +52,21 @@ class VectorDB:
             persist_directory: Directory for ChromaDB persistence
             collection_name: Name of the ChromaDB collection
             ollama_base_url: Optional base URL for Ollama API
-            max_chunk_chars: Maximum chars per chunk before truncation (default 800)
+            max_tokens: Maximum tokens per chunk (default 480 for 512-token models)
+            tokenizer_model: HuggingFace tokenizer model name (default: bge-base-en-v1.5)
         """
         self.embedding_model = embedding_model
         self.persist_directory = persist_directory
         self.collection_name = collection_name
-        self.max_chunk_chars = max_chunk_chars or self.MAX_CHUNK_CHARS
+        self.max_tokens = max_tokens or self.DEFAULT_MAX_TOKENS
+        self.tokenizer_model = tokenizer_model or self.DEFAULT_TOKENIZER
+        
+        # Initialize token chunker for guardrail
+        self._chunker = TokenChunker(
+            model_name=self.tokenizer_model,
+            max_tokens=self.max_tokens,
+            overlap_tokens=50,  # Small overlap for guardrail splits
+        )
         
         # Configure Ollama client if base URL is provided
         if ollama_base_url:
@@ -165,31 +177,80 @@ class VectorDB:
         """Generate a deterministic ID for a chunk."""
         return hashlib.sha256(chunk.encode()).hexdigest()[:16]
 
-    def _truncate_text(self, text: str) -> str:
-        """Truncate text to max_chunk_chars, breaking at word boundary."""
-        if len(text) <= self.max_chunk_chars:
+    def _truncate_to_tokens(self, text: str) -> str:
+        """
+        Truncate text to fit within token limit, preserving original text.
+        
+        Unlike splitting, this preserves 1:1 mapping between input and output.
+        """
+        if self._chunker.token_count(text) <= self.max_tokens:
             return text
         
-        # Find last space before limit
-        truncated = text[:self.max_chunk_chars]
-        last_space = truncated.rfind(' ')
-        if last_space > self.max_chunk_chars * 0.8:  # Only use if > 80% of max
-            truncated = truncated[:last_space]
+        # Get offsets to slice original text (preserves casing, spacing)
+        encoding = self._chunker.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True
+        )
+        offsets = encoding['offset_mapping']
         
-        logger.debug(f"Truncated chunk from {len(text)} to {len(truncated)} chars")
+        if len(offsets) <= self.max_tokens:
+            return text
+        
+        # Slice original text at token boundary
+        char_end = offsets[self.max_tokens - 1][1]
+        truncated = text[:char_end]
+        
+        logger.debug(f"Truncated text from {len(offsets)} to {self.max_tokens} tokens")
         return truncated
+
+    def _truncate_texts(self, texts: List[str]) -> List[str]:
+        """Truncate all texts to fit within token limit (preserves count)."""
+        return [self._truncate_to_tokens(t) for t in texts]
 
     def _get_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text."""
-        text = self._truncate_text(text)
+        text = self._truncate_to_tokens(text)
         result = ollama.embed(model=self.embedding_model, input=text)
         return result['embeddings'][0]
 
     def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts in a single call."""
-        texts = [self._truncate_text(t) for t in texts]
-        result = ollama.embed(model=self.embedding_model, input=texts)
-        return result['embeddings']
+        """
+        Generate embeddings for multiple texts with resilient error handling.
+        
+        Uses bisect-on-failure to recover from individual oversized texts.
+        """
+        safe_texts = self._truncate_texts(texts)
+        return self._embed_resilient(safe_texts)
+    
+    def _embed_resilient(self, texts: List[str]) -> List[List[float]]:
+        """
+        Embed texts with automatic bisect-on-failure recovery.
+        
+        If a batch fails due to context length, recursively bisect to find
+        and handle the problematic text(s).
+        """
+        try:
+            result = ollama.embed(model=self.embedding_model, input=texts)
+            return result['embeddings']
+        except ResponseError as e:
+            if "exceeds the context length" not in str(e):
+                raise
+            
+            if len(texts) == 1:
+                # Single text still too long - this shouldn't happen after guardrail
+                # but handle it by truncating aggressively
+                logger.warning(f"Single text still exceeds limit, truncating: {texts[0][:50]}...")
+                truncated = texts[0][:500]  # Emergency fallback
+                result = ollama.embed(model=self.embedding_model, input=truncated)
+                return result['embeddings']
+            
+            # Bisect and retry
+            logger.debug(f"Batch failed, bisecting {len(texts)} texts")
+            mid = len(texts) // 2
+            left = self._embed_resilient(texts[:mid])
+            right = self._embed_resilient(texts[mid:])
+            return left + right
 
     def add_chunk(self, chunk: str) -> None:
         """
