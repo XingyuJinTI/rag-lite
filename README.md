@@ -6,8 +6,6 @@ A lightweight, privacy-first Retrieval-Augmented Generation (RAG) system for kno
 
 RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, running entirely on local infrastructure. No data leaves your environment.
 
-- **Embeddings**: sentence-transformers (fast, local, HuggingFace models)
-- **LLM Generation**: Ollama (local LLM inference)
 
 ## Architecture
 
@@ -31,6 +29,9 @@ RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, runnin
 | `generation` | Context-aware response generation |
 | `rag_pipeline` | Orchestration layer |
 | `config` | Environment-based configuration |
+
+- **Embeddings**: sentence-transformers (fast, local, HuggingFace models)
+- **LLM Generation**: Ollama (local LLM inference)
 
 ## Requirements
 

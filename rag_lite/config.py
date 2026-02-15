@@ -12,7 +12,6 @@ Configuration Precedence (highest to lowest):
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 
 def _get_env_bool(key: str, default: bool) -> bool:
@@ -53,10 +52,8 @@ def _get_env_str(key: str, default: str) -> str:
 @dataclass
 class ModelConfig:
     """Configuration for AI models."""
-    # HuggingFace model name for sentence-transformers (recommended)
-    # For Ollama, use: "hf.co/CompendiumLabs/bge-base-en-v1.5-gguf"
-    embedding_model: str = "BAAI/bge-base-en-v1.5"
-    language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"
+    embedding_model: str = "BAAI/bge-base-en-v1.5"  # HuggingFace model for sentence-transformers
+    language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -140,7 +137,6 @@ class Config:
     retrieval: RetrievalConfig
     storage: StorageConfig
     data_file: str = "cat-facts.txt"
-    ollama_base_url: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -150,7 +146,6 @@ class Config:
             retrieval=RetrievalConfig.from_env(),
             storage=StorageConfig.from_env(),
             data_file=_get_env_str("DATA_FILE", cls.data_file),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL"),
         )
 
     @classmethod
