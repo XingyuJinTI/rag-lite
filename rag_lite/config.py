@@ -52,8 +52,13 @@ def _get_env_str(key: str, default: str) -> str:
 @dataclass
 class ModelConfig:
     """Configuration for AI models."""
+    
+    # Cross-encoder reranker model
+    RERANKER_BGE_BASE: str = "BAAI/bge-reranker-base"
+    
     embedding_model: str = "BAAI/bge-base-en-v1.5"  # HuggingFace model for sentence-transformers
     language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
+    reranker_model: str = RERANKER_BGE_BASE  # Cross-encoder model for reranking
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -61,6 +66,7 @@ class ModelConfig:
         return cls(
             embedding_model=_get_env_str("EMBEDDING_MODEL", cls.embedding_model),
             language_model=_get_env_str("LANGUAGE_MODEL", cls.language_model),
+            reranker_model=_get_env_str("RERANKER_MODEL", cls.reranker_model),
         )
 
 
@@ -89,17 +95,13 @@ class RetrievalConfig:
     retrieve_k: int = 50          # Candidates from each search method
     fusion_k: int = 20            # Candidates after RRF fusion (rerank pool)
     
-    # Feature flags
-    use_hybrid_search: bool = True   # Use semantic + BM25 with RRF (False = semantic only)
-    use_reranking: bool = False
+    # Feature flags (CLI defaults to semantic-only; use --hybrid to enable)
+    use_hybrid_search: bool = True   # Semantic + BM25 with RRF
+    use_reranking: bool = False      # Cross-encoder reranking
     
     # RRF parameters
     rrf_k: int = 60               # RRF constant (standard value)
     rrf_weight: float = 0.7       # Semantic weight in RRF; BM25 gets 1 - rrf_weight (0.3)
-    
-    # Reranking weights
-    rerank_weight: float = 0.8
-    original_score_weight: float = 0.2
     
     # BM25 parameters
     bm25_k1: float = 1.5          # Term frequency saturation (1.2-2.0)
@@ -116,8 +118,6 @@ class RetrievalConfig:
             use_reranking=_get_env_bool("USE_RERANKING", cls.use_reranking),
             rrf_k=_get_env_int("RRF_K", cls.rrf_k),
             rrf_weight=_get_env_float("RRF_WEIGHT", cls.rrf_weight),
-            rerank_weight=_get_env_float("RERANK_WEIGHT", cls.rerank_weight),
-            original_score_weight=_get_env_float("ORIGINAL_SCORE_WEIGHT", cls.original_score_weight),
             bm25_k1=_get_env_float("BM25_K1", cls.bm25_k1),
             bm25_b=_get_env_float("BM25_B", cls.bm25_b),
         )

@@ -57,7 +57,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import RAG-Lite core
-from rag_lite import RAGPipeline, Config
+from rag_lite import RAGPipeline, Config, ModelConfig
 
 # Import evaluation tools
 from evaluation import (
@@ -89,14 +89,14 @@ def load_config_file(config_path: str) -> List[Dict]:
     Available config parameters:
         - name: str (required) - Display name for the configuration
         - use_hybrid_search: bool - Enable BM25 + semantic fusion
-        - use_reranking: bool - Enable LLM reranking
+        - use_reranking: bool - Enable cross-encoder reranking
+        - reranker_model: str - Cross-encoder model (default: 'bge')
         - rrf_k: int - RRF constant (higher = more uniform ranking)
         - rrf_weight: float - Semantic weight (0.0=all BM25, 1.0=all semantic)
         - retrieve_k: int - Candidates from each search method
         - fusion_k: int - Candidates after RRF fusion
         - bm25_k1: float - BM25 term frequency saturation
         - bm25_b: float - BM25 document length normalization
-        - rerank_weight: float - Weight for rerank vs original score
     
     Args:
         config_path: Path to JSON config file
@@ -138,6 +138,7 @@ def run_evaluation(
     config_file: Optional[str] = None,
     use_hybrid: bool = True,
     use_reranking: bool = False,
+    reranker_model: str = "bge",
     interactive: bool = True,
 ):
     """
@@ -151,7 +152,8 @@ def run_evaluation(
         compare_configs: Whether to compare multiple configurations
         config_file: Path to JSON config file with configurations to compare
         use_hybrid: Enable hybrid search (BM25 + semantic)
-        use_reranking: Enable LLM reranking
+        use_reranking: Enable cross-encoder reranking
+        reranker_model: Reranker model (default: 'bge' = BAAI/bge-reranker-base)
         interactive: Run interactive query mode after evaluation
     """
     print("\n" + "=" * 70)
@@ -212,6 +214,9 @@ def run_evaluation(
     config.retrieval.use_hybrid_search = use_hybrid
     config.retrieval.use_reranking = use_reranking
     
+    # Set reranker model (BGE is the only recommended option)
+    config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
+    
     # Update collection name to be unique per dataset
     config.storage.collection_name = f"eval_{dataset_name}"
     
@@ -247,10 +252,10 @@ def run_evaluation(
             {"name": "hybrid_bm25+semantic", "use_hybrid_search": True, "use_reranking": False},
         ]
         
-        # Only add reranking if it's fast enough (small dataset)
-        if len(eval_examples) <= 30:
+        # Add reranking configuration (cross-encoder is much faster than LLM-based)
+        if len(eval_examples) <= 100:
             configurations.append(
-                {"name": "hybrid+reranking", "use_hybrid_search": True, "use_reranking": True}
+                {"name": "hybrid+rerank_bge", "use_hybrid_search": True, "use_reranking": True, "reranker_model": "bge"}
             )
     
     if configurations:
@@ -384,7 +389,14 @@ Config File Format (JSON):
     parser.add_argument(
         "--rerank",
         action="store_true",
-        help="Enable LLM reranking"
+        help="Enable cross-encoder reranking"
+    )
+    
+    parser.add_argument(
+        "--reranker",
+        type=str,
+        default="bge",
+        help="Reranker model (default: BAAI/bge-reranker-base)"
     )
     
     parser.add_argument(
@@ -404,6 +416,7 @@ Config File Format (JSON):
         config_file=args.config_file,
         use_hybrid=not args.no_hybrid,
         use_reranking=args.rerank,
+        reranker_model=args.reranker,
         interactive=not args.no_interactive,
     )
 

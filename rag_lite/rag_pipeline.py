@@ -65,7 +65,7 @@ class RAGPipeline:
         rrf_weight: Optional[float] = None,
         bm25_k1: Optional[float] = None,
         bm25_b: Optional[float] = None,
-        rerank_weight: Optional[float] = None,
+        reranker_model: Optional[str] = None,
     ) -> List[Tuple[str, float]]:
         """
         Retrieve relevant chunks for a query.
@@ -74,11 +74,11 @@ class RAGPipeline:
         1. Semantic search via ChromaDB HNSW
         2. BM25 keyword search
         3. RRF fusion (weighted: semantic=0.7, BM25=0.3 by default)
-        4. Optional LLM reranking
+        4. Optional cross-encoder reranking
         
         When hybrid is disabled:
         1. Semantic search only
-        2. Optional LLM reranking
+        2. Optional cross-encoder reranking
         
         Args:
             query: User query
@@ -91,7 +91,7 @@ class RAGPipeline:
             rrf_weight: Semantic weight in RRF; BM25 gets 1 - rrf_weight (overrides config)
             bm25_k1: BM25 term frequency saturation (overrides config)
             bm25_b: BM25 document length normalization (overrides config)
-            rerank_weight: Weight for rerank score vs original (overrides config)
+            reranker_model: Cross-encoder model for reranking (overrides config)
             
         Returns:
             List of (chunk, score) tuples
@@ -106,7 +106,7 @@ class RAGPipeline:
         rrf_weight = rrf_weight if rrf_weight is not None else self.config.retrieval.rrf_weight
         bm25_k1 = bm25_k1 if bm25_k1 is not None else self.config.retrieval.bm25_k1
         bm25_b = bm25_b if bm25_b is not None else self.config.retrieval.bm25_b
-        rerank_weight = rerank_weight if rerank_weight is not None else self.config.retrieval.rerank_weight
+        reranker_model = reranker_model if reranker_model is not None else self.config.model.reranker_model
         
         return retrieve(
             query=query,
@@ -121,8 +121,7 @@ class RAGPipeline:
             bm25_b=bm25_b,
             rrf_k=rrf_k,
             rrf_weight=rrf_weight,
-            rerank_weight=rerank_weight,
-            original_score_weight=self.config.retrieval.original_score_weight,
+            reranker_model=reranker_model,
         )
 
     def generate(

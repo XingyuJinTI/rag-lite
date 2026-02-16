@@ -5,18 +5,24 @@ This module implements retrieval strategies including:
 - Semantic search using ChromaDB's HNSW index
 - BM25 keyword search
 - Hybrid search with RRF fusion
-- LLM-based reranking
+- Cross-encoder reranking (using sentence-transformers)
 - Query expansion
 """
 
-import json
 import logging
 import math
 import re
 from collections import Counter
 from typing import List, Tuple, Optional, Dict
 
+import numpy as np
 import ollama
+
+from .utils import get_device
+
+# Lazy load cross-encoder to avoid import overhead when not using reranking
+_cross_encoder_model = None
+_cross_encoder_model_name = None
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +33,7 @@ def _tokenize(text: str) -> List[str]:
 
 
 class BM25Scorer:
-    """
-    BM25 scorer with pre-computed corpus statistics.
-    
-    BM25 (Best Matching 25) is the industry standard for keyword search,
-    used by Elasticsearch, Lucene, and other production systems.
-    """
+    """BM25 scorer with pre-computed corpus statistics."""
     
     def __init__(self, corpus: List[str], k1: float = 1.5, b: float = 0.75):
         """
@@ -113,20 +114,15 @@ def reciprocal_rank_fusion(
     rrf_weight: float = 0.7
 ) -> List[Tuple[str, float]]:
     """
-    Combine multiple ranked lists using Weighted Reciprocal Rank Fusion (RRF).
-    
-    RRF is a robust rank aggregation method. It doesn't require score normalization.
-    
-    Formula: RRF_score(d) = Σ weight_i * 1/(k + rank_i(d))
+    Combine ranked lists using Weighted Reciprocal Rank Fusion.
     
     Args:
-        ranked_lists: List of ranked result lists, each containing (chunk, score) tuples
-        k: Ranking constant (default 60, from original RRF paper)
-        rrf_weight: Weight for semantic (first) list; BM25 (second) gets 1 - rrf_weight
-                   Default 0.7 means semantic=0.7, BM25=0.3
+        ranked_lists: List of (chunk, score) tuples per ranking method
+        k: RRF constant (default 60)
+        rrf_weight: Weight for first list (default 0.7); second gets 1 - rrf_weight
         
     Returns:
-        List of (chunk, rrf_score) tuples, sorted by score descending
+        List of (chunk, rrf_score) tuples, sorted descending
     """
     rrf_scores: Dict[str, float] = {}
     
@@ -214,241 +210,77 @@ Alternative questions:"""
         return [query]
 
 
-def _parse_rerank_json(response_text: str, expected_ids: List[str]) -> Dict[str, float]:
+def _get_cross_encoder(model_name: str):
     """
-    Parse and validate JSON response from reranking LLM.
+    Get or create a cross-encoder model (lazy loading with caching).
     
     Args:
-        response_text: Raw response text from LLM
-        expected_ids: List of expected passage IDs
+        model_name: Name of the cross-encoder model (e.g., 'BAAI/bge-reranker-base')
         
     Returns:
-        Dictionary mapping passage IDs to scores (0-100 scale)
+        CrossEncoder model instance
     """
-    scores = {}
-    original_response = response_text
+    global _cross_encoder_model, _cross_encoder_model_name
     
-    # Remove markdown code blocks if present
-    response_text = response_text.strip()
-    if response_text.startswith("```"):
-        response_text = re.sub(r'```(?:json)?\s*\n?', '', response_text, flags=re.MULTILINE)
-        response_text = re.sub(r'\n?```\s*$', '', response_text, flags=re.MULTILINE)
-        response_text = response_text.strip()
-    
-    # Try multiple strategies to find JSON
-    json_candidates = [response_text]
-    
-    # Find balanced braces
-    brace_start = response_text.find('{')
-    if brace_start != -1:
-        brace_count = 0
-        for i in range(brace_start, len(response_text)):
-            if response_text[i] == '{':
-                brace_count += 1
-            elif response_text[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    json_candidates.append(response_text[brace_start:i+1])
-                    break
-    
-    # Find balanced brackets
-    bracket_start = response_text.find('[')
-    if bracket_start != -1:
-        bracket_count = 0
-        for i in range(bracket_start, len(response_text)):
-            if response_text[i] == '[':
-                bracket_count += 1
-            elif response_text[i] == ']':
-                bracket_count -= 1
-                if bracket_count == 0:
-                    json_candidates.append(response_text[bracket_start:i+1])
-                    break
-    
-    # Try parsing each candidate
-    for candidate in json_candidates:
+    if _cross_encoder_model is None or _cross_encoder_model_name != model_name:
         try:
-            data = json.loads(candidate)
-            
-            if isinstance(data, dict) and "results" in data:
-                results = data["results"]
-            elif isinstance(data, list):
-                results = data
-            elif isinstance(data, dict):
-                results = [data]
-            else:
-                results = []
-            
-            for item in results:
-                if isinstance(item, dict):
-                    passage_id = item.get("id") or item.get("passage_id") or item.get("passageId")
-                    score = item.get("score")
-                    
-                    if passage_id and score is not None:
-                        if isinstance(score, (int, float)):
-                            scores[str(passage_id)] = max(0.0, min(100.0, float(score)))
-            
-            if scores:
-                break
-                
-        except json.JSONDecodeError:
-            continue
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers is required for cross-encoder reranking. "
+                "Install it with: pip install sentence-transformers"
+            )
+        
+        device = get_device()
+        logger.info(f"Loading cross-encoder model: {model_name} on {device}")
+        _cross_encoder_model = CrossEncoder(model_name, device=device)
+        _cross_encoder_model_name = model_name
+        logger.info(f"Cross-encoder model loaded successfully on {device}")
     
-    # Regex fallback
-    if not scores:
-        logger.debug(f"JSON parsing failed, trying regex fallback")
-        for passage_id in expected_ids:
-            patterns = [
-                rf'["\']?{re.escape(passage_id)}["\']?\s*[:=]\s*(\d+(?:\.\d+)?)',
-                rf'"id"\s*:\s*["\']?{re.escape(passage_id)}["\']?\s*,\s*"score"\s*:\s*(\d+(?:\.\d+)?)',
-                rf'"score"\s*:\s*(\d+(?:\.\d+)?)\s*,\s*"id"\s*:\s*["\']?{re.escape(passage_id)}["\']?',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, response_text, re.IGNORECASE)
-                if match:
-                    scores[passage_id] = max(0.0, min(100.0, float(match.group(1))))
-                    break
-    
-    if not scores:
-        logger.warning(f"Could not parse scores from response. Preview: {original_response[:500]}")
-    
-    return scores
+    return _cross_encoder_model
 
 
-def rerank_with_llm(
+def rerank_with_cross_encoder(
     query: str,
-    candidates: List[Tuple[str, float, float]],
-    language_model: str,
-    rerank_weight: float = 0.8,
-    original_score_weight: float = 0.2,
-    max_retries: int = 1
+    candidates: List[Tuple[str, float]],
+    reranker_model: str,
 ) -> List[Tuple[str, float]]:
     """
-    Rerank candidates using LLM to score relevance.
+    Rerank candidates using a cross-encoder model.
     
     Args:
         query: User query
-        candidates: List of (chunk, combined_score, semantic_score) tuples
-        language_model: Name of the language model
-        rerank_weight: Weight for rerank score
-        original_score_weight: Weight for original score
-        max_retries: Maximum retries for missing scores
+        candidates: List of (chunk, score) tuples from first-stage retrieval
+        reranker_model: Name of the cross-encoder model
         
     Returns:
-        List of (chunk, final_score) tuples, sorted by score descending
+        List of (chunk, score) tuples, sorted by relevance
     """
     if not candidates:
         return []
     
-    passage_ids = [f"p{i}" for i in range(len(candidates))]
-    candidate_texts = [chunk.strip() for chunk, _, _ in candidates]
+    # Get cross-encoder model
+    cross_encoder = _get_cross_encoder(reranker_model)
     
-    passages_text = "\n".join([
-        f"[{pid}] {text}" 
-        for pid, text in zip(passage_ids, candidate_texts)
-    ])
+    # Prepare query-document pairs for scoring
+    candidate_texts = [chunk.strip() for chunk, _ in candidates]
+    pairs = [(query, text) for text in candidate_texts]
     
-    rerank_prompt = f"""You are a reranker. Score how relevant each passage is to the query.
-
-CRITICAL: You must respond with ONLY valid JSON. No explanations, no markdown, no text before or after.
-
-Required JSON format:
-{{
-  "results": [
-    {{"id": "p0", "score": 85}},
-    {{"id": "p1", "score": 72}},
-    {{"id": "p2", "score": 45}}
-  ]
-}}
-
-Rules:
-1. Output ONLY the JSON object - no markdown code blocks, no explanations
-2. You MUST include exactly one entry for each passage ID: {', '.join(passage_ids)}
-3. Each entry must have "id" (exact string from list above) and "score" (integer 0-100)
-4. Use the exact passage IDs provided (case-sensitive)
-5. Score: 0 = not relevant, 100 = highly relevant
-
-Query: {query}
-
-Passages:
-{passages_text}
-
-Remember: Output ONLY the JSON, nothing else."""
+    # Get relevance scores
+    logger.debug(f"Reranking {len(candidates)} candidates...")
+    scores = cross_encoder.predict(pairs, show_progress_bar=False)
     
-    scores = {}
-    retry_count = 0
+    # Normalize scores to 0-1 range
+    min_score, max_score = float(np.min(scores)), float(np.max(scores))
+    if max_score > min_score:
+        normalized_scores = [(s - min_score) / (max_score - min_score) for s in scores]
+    else:
+        normalized_scores = [0.5] * len(scores)
     
-    while retry_count <= max_retries:
-        try:
-            response = ollama.chat(
-                model=language_model,
-                messages=[
-                    {
-                        'role': 'system',
-                        'content': 'You are a JSON-only API. Always respond with valid JSON only.'
-                    },
-                    {'role': 'user', 'content': rerank_prompt}
-                ],
-            )
-            
-            response_text = response['message']['content'].strip()
-            if retry_count == 0:
-                logger.debug(f"LLM rerank response: {response_text[:500]}")
-            
-            parsed_scores = _parse_rerank_json(response_text, passage_ids)
-            scores.update(parsed_scores)
-            
-            missing_ids = [pid for pid in passage_ids if pid not in scores]
-            
-            if not missing_ids:
-                break
-            elif retry_count < max_retries:
-                logger.warning(f"Missing scores for {missing_ids}, retrying...")
-                
-                id_to_text = dict(zip(passage_ids, candidate_texts))
-                missing_passages = [f"[{pid}] {id_to_text[pid]}" for pid in missing_ids]
-                
-                retry_prompt = f"""Score these passages for the query. Output ONLY JSON.
-
-Query: {query}
-
-Passages:
-{chr(10).join(missing_passages)}
-
-Format: {{"results": [{{"id": "p0", "score": 85}}]}}"""
-                
-                retry_response = ollama.chat(
-                    model=language_model,
-                    messages=[
-                        {'role': 'system', 'content': 'You are a JSON-only API.'},
-                        {'role': 'user', 'content': retry_prompt}
-                    ],
-                )
-                
-                retry_scores = _parse_rerank_json(retry_response['message']['content'].strip(), missing_ids)
-                scores.update(retry_scores)
-                break
-            else:
-                logger.warning(f"Max retries reached. Missing: {missing_ids}")
-                break
-                
-        except Exception as e:
-            logger.error(f"Reranking failed: {e}")
-            break
-        
-        retry_count += 1
+    # Build result with cross-encoder scores only
+    reranked = [(chunk, normalized_scores[i]) for i, (chunk, _) in enumerate(candidates)]
     
-    reranked = []
-    for i, (chunk, original_score, _) in enumerate(candidates):
-        passage_id = passage_ids[i]
-        
-        if passage_id in scores:
-            rerank_score = scores[passage_id] / 100.0
-        else:
-            rerank_score = original_score
-        
-        final_score = rerank_score * rerank_weight + original_score * original_score_weight
-        reranked.append((chunk, final_score))
-    
+    # Sort by score descending
     reranked.sort(key=lambda x: x[1], reverse=True)
     return reranked
 
@@ -466,8 +298,7 @@ def retrieve(
     bm25_b: float = 0.75,
     rrf_k: int = 60,
     rrf_weight: float = 0.7,
-    rerank_weight: float = 0.8,
-    original_score_weight: float = 0.2,
+    reranker_model: Optional[str] = None,
 ) -> List[Tuple[str, float]]:
     """
     Retrieve relevant chunks using semantic search with optional hybrid (BM25 + RRF).
@@ -475,28 +306,27 @@ def retrieve(
     Args:
         query: User query
         vector_db: VectorDB instance
-        language_model: Language model for reranking
+        language_model: Language model (kept for API compatibility)
         top_n: Final results to return
         retrieve_k: Candidates from each search method
         fusion_k: Candidates after fusion (rerank pool)
         use_hybrid_search: Use semantic + BM25 with RRF fusion (False = semantic only)
-        use_reranking: Enable LLM reranking
+        use_reranking: Enable cross-encoder reranking
         bm25_k1: BM25 k1 parameter
         bm25_b: BM25 b parameter
         rrf_k: RRF constant
         rrf_weight: Weight for semantic in RRF (default 0.7); BM25 gets 1 - rrf_weight (0.3)
-        rerank_weight: Rerank score weight
-        original_score_weight: Original score weight
+        reranker_model: Cross-encoder model for reranking (e.g., 'BAAI/bge-reranker-base')
         
     Returns:
         List of (chunk, score) tuples
     """
-    # Step 1: Semantic search (always)
-    logger.debug(f"Semantic search for: {query[:50]}...")
-    semantic_results = vector_db.search(query, n_results=retrieve_k)
-    logger.debug(f"Semantic: {len(semantic_results)} results")
-    
     if use_hybrid_search:
+        # Step 1: Semantic search
+        logger.debug(f"Semantic search for: {query[:50]}...")
+        semantic_results = vector_db.search(query, n_results=retrieve_k)
+        logger.debug(f"Semantic: {len(semantic_results)} results")
+        
         # Step 2: FTS5 keyword search (fast, uses pre-built index)
         logger.debug("FTS5 keyword search...")
         keyword_results = vector_db.search_fts(query=query, n_results=retrieve_k)
@@ -512,20 +342,17 @@ def retrieve(
         
         top_candidates = fused_results[:fusion_k]
     else:
-        # Semantic only
-        top_candidates = semantic_results[:fusion_k]
+        # Semantic only - fetch only what we need (fusion_k for reranking, or top_n if no reranking)
+        fetch_k = fusion_k if use_reranking else top_n
+        logger.debug(f"Semantic search for: {query[:50]}...")
+        semantic_results = vector_db.search(query, n_results=fetch_k)
+        logger.debug(f"Semantic: {len(semantic_results)} results")
+        top_candidates = semantic_results
     
-    # Step 4: Optional reranking
-    if use_reranking and len(top_candidates) > top_n:
-        logger.debug(f"Reranking {len(top_candidates)} candidates...")
-        candidates_for_rerank = [(chunk, score, score) for chunk, score in top_candidates]
-        reranked = rerank_with_llm(
-            query,
-            candidates_for_rerank,
-            language_model,
-            rerank_weight,
-            original_score_weight
-        )
+    # Step 4: Optional cross-encoder reranking
+    if use_reranking and len(top_candidates) > top_n and reranker_model:
+        logger.debug(f"Reranking {len(top_candidates)} candidates with {reranker_model}...")
+        reranked = rerank_with_cross_encoder(query, top_candidates, reranker_model)
         return reranked[:top_n]
     
     return top_candidates[:top_n]

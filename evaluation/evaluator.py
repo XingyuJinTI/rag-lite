@@ -85,7 +85,7 @@ class RAGEvaluator:
         rrf_weight: Optional[float] = None,
         bm25_k1: Optional[float] = None,
         bm25_b: Optional[float] = None,
-        rerank_weight: Optional[float] = None,
+        reranker_model: Optional[str] = None,
     ) -> RetrievalMetrics:
         """
         Run evaluation on the dataset.
@@ -101,7 +101,7 @@ class RAGEvaluator:
             rrf_weight: Semantic weight in RRF; BM25 gets 1 - rrf_weight (default 0.7)
             bm25_k1: BM25 term frequency saturation (default 1.5)
             bm25_b: BM25 document length normalization (default 0.75)
-            rerank_weight: Weight for rerank score vs original (default 0.6)
+            reranker_model: Cross-encoder model for reranking (default: 'bge')
             
         Returns:
             RetrievalMetrics with all computed metrics
@@ -133,8 +133,13 @@ class RAGEvaluator:
             retrieve_kwargs["bm25_k1"] = bm25_k1
         if bm25_b is not None:
             retrieve_kwargs["bm25_b"] = bm25_b
-        if rerank_weight is not None:
-            retrieve_kwargs["rerank_weight"] = rerank_weight
+        if reranker_model is not None:
+            # Convert shorthand to full model name
+            from rag_lite.config import ModelConfig
+            if reranker_model == "bge":
+                retrieve_kwargs["reranker_model"] = ModelConfig.RERANKER_BGE_BASE
+            else:
+                retrieve_kwargs["reranker_model"] = reranker_model
         
         # Accumulators
         recall_1 = []
@@ -274,14 +279,14 @@ class RAGEvaluator:
                 and any retrieval parameters to override:
                 
                 - use_hybrid_search: bool - Enable/disable hybrid search
-                - use_reranking: bool - Enable/disable LLM reranking
+                - use_reranking: bool - Enable/disable cross-encoder reranking
+                - reranker_model: str - Cross-encoder model (default: 'bge')
                 - retrieve_k: int - Candidates from each search method
                 - fusion_k: int - Candidates after RRF fusion
                 - rrf_k: int - RRF constant (higher = more uniform ranking)
                 - rrf_weight: float - Semantic weight in RRF (BM25 = 1 - rrf_weight)
                 - bm25_k1: float - BM25 term frequency saturation
                 - bm25_b: float - BM25 document length normalization
-                - rerank_weight: float - Weight for rerank score vs original
                 
             top_k: Number of results to retrieve
             max_examples: Maximum examples to evaluate
@@ -298,11 +303,11 @@ class RAGEvaluator:
             ... ]
             >>> results = evaluator.compare_configurations(configs)
             
-            >>> # Compare semantic vs hybrid with different BM25 tuning
+            >>> # Compare semantic vs hybrid with different rerankers
             >>> configs = [
             ...     {"name": "semantic_only", "use_hybrid_search": False},
             ...     {"name": "hybrid_default", "use_hybrid_search": True},
-            ...     {"name": "hybrid_bm25_tuned", "use_hybrid_search": True, "bm25_k1": 2.0, "bm25_b": 0.5},
+            ...     {"name": "hybrid+bge_rerank", "use_hybrid_search": True, "use_reranking": True, "reranker_model": "bge"},
             ... ]
             >>> results = evaluator.compare_configurations(configs)
         """
