@@ -101,7 +101,7 @@ class RAGEvaluator:
             rrf_weight: Semantic weight in RRF; BM25 gets 1 - rrf_weight (default 0.7)
             bm25_k1: BM25 term frequency saturation (default 1.5)
             bm25_b: BM25 document length normalization (default 0.75)
-            reranker_model: Cross-encoder model for reranking ('bge' or 'ms-marco')
+            reranker_model: Cross-encoder model for reranking (default: 'bge')
             
         Returns:
             RetrievalMetrics with all computed metrics
@@ -138,8 +138,6 @@ class RAGEvaluator:
             from rag_lite.config import ModelConfig
             if reranker_model == "bge":
                 retrieve_kwargs["reranker_model"] = ModelConfig.RERANKER_BGE_BASE
-            elif reranker_model == "ms-marco":
-                retrieve_kwargs["reranker_model"] = ModelConfig.RERANKER_MS_MARCO
             else:
                 retrieve_kwargs["reranker_model"] = reranker_model
         
@@ -282,7 +280,7 @@ class RAGEvaluator:
                 
                 - use_hybrid_search: bool - Enable/disable hybrid search
                 - use_reranking: bool - Enable/disable cross-encoder reranking
-                - reranker_model: str - Cross-encoder model ('bge' or 'ms-marco')
+                - reranker_model: str - Cross-encoder model (default: 'bge')
                 - retrieve_k: int - Candidates from each search method
                 - fusion_k: int - Candidates after RRF fusion
                 - rrf_k: int - RRF constant (higher = more uniform ranking)

@@ -18,6 +18,8 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+from .utils import get_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,9 +57,10 @@ class VectorDB:
         self.collection_name = collection_name
         self.max_chunk_chars = max_chunk_chars or self.MAX_CHUNK_CHARS
         
-        # Initialize sentence-transformers model
-        logger.info(f"Loading embedding model: {embedding_model}")
-        self._model = SentenceTransformer(embedding_model)
+        # Initialize sentence-transformers model with best available device
+        device = get_device()
+        logger.info(f"Loading embedding model: {embedding_model} on {device}")
+        self._model = SentenceTransformer(embedding_model, device=device)
         logger.info(f"Loaded embedding model with dimension {self._model.get_sentence_embedding_dimension()}")
         
         # Initialize ChromaDB with persistence
@@ -72,8 +75,9 @@ class VectorDB:
             metadata={"hnsw:space": "cosine"}  # Use cosine similarity
         )
         
-        # Initialize FTS5 for keyword search
+        # Initialize FTS5 for keyword search with persistent connection
         self._fts_db_path = os.path.join(persist_directory, f"{collection_name}_fts.db")
+        self._fts_conn = sqlite3.connect(self._fts_db_path, check_same_thread=False)
         self._init_fts()
         
         # Check if FTS index needs rebuilding (out of sync with ChromaDB)
@@ -86,8 +90,7 @@ class VectorDB:
 
     def _init_fts(self) -> None:
         """Initialize SQLite FTS5 database for keyword search."""
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         
         # Create FTS5 virtual table with BM25 support
         cursor.execute("""
@@ -105,8 +108,7 @@ class VectorDB:
             )
         """)
         
-        conn.commit()
-        conn.close()
+        self._fts_conn.commit()
     
     def _sync_fts_if_needed(self) -> None:
         """Check if FTS index is in sync with ChromaDB and rebuild if needed."""
@@ -115,11 +117,9 @@ class VectorDB:
         if chroma_count == 0:
             return
         
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM indexed_chunks")
         fts_count = cursor.fetchone()[0]
-        conn.close()
         
         # If counts differ significantly, rebuild
         if fts_count < chroma_count * 0.9:  # Allow 10% tolerance
@@ -131,8 +131,7 @@ class VectorDB:
         if not chunk_ids:
             return
             
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         
         # Check which chunks are already indexed
         placeholders = ','.join('?' * len(chunk_ids))
@@ -157,9 +156,7 @@ class VectorDB:
                 "INSERT INTO indexed_chunks (chunk_id) VALUES (?)",
                 [(cid,) for cid, _ in new_data]
             )
-            conn.commit()
-        
-        conn.close()
+            self._fts_conn.commit()
     
     def _generate_id(self, chunk: str) -> str:
         """Generate a deterministic ID for a chunk."""
@@ -182,7 +179,7 @@ class VectorDB:
     def _get_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text."""
         text = self._truncate_text(text)
-        embedding = self._model.encode(text, convert_to_numpy=True)
+        embedding = self._model.encode(text, convert_to_numpy=True, show_progress_bar=False)
         return embedding.tolist()
 
     def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
@@ -353,14 +350,12 @@ class VectorDB:
         Returns:
             List of (chunk, bm25_score) tuples sorted by relevance
         """
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         
         # Escape special FTS5 characters and build query
         # Split into words, escape each, join with implicit AND
         words = query.split()
         if not words:
-            conn.close()
             return []
         
         # Escape special characters for FTS5
@@ -372,7 +367,6 @@ class VectorDB:
                 escaped_words.append(f'"{clean_word}"')
         
         if not escaped_words:
-            conn.close()
             return []
         
         # Use OR for better recall (AND is too strict for short queries)
@@ -407,8 +401,6 @@ class VectorDB:
             else:
                 results = []
         
-        conn.close()
-        
         # Normalize scores to 0-1 range
         if results:
             max_score = max(score for _, score in results) if results else 1.0
@@ -430,12 +422,10 @@ class VectorDB:
         )
         
         # Clear FTS5 index
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         cursor.execute("DELETE FROM chunks_fts")
         cursor.execute("DELETE FROM indexed_chunks")
-        conn.commit()
-        conn.close()
+        self._fts_conn.commit()
         
         logger.info("Vector database and FTS index cleared")
 
@@ -461,12 +451,10 @@ class VectorDB:
         logger.info(f"Rebuilding FTS index for {len(chunks)} documents...")
         
         # Clear existing FTS data
-        conn = sqlite3.connect(self._fts_db_path)
-        cursor = conn.cursor()
+        cursor = self._fts_conn.cursor()
         cursor.execute("DELETE FROM chunks_fts")
         cursor.execute("DELETE FROM indexed_chunks")
-        conn.commit()
-        conn.close()
+        self._fts_conn.commit()
         
         # Add all chunks in batches
         batch_size = 500

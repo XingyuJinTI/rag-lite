@@ -15,7 +15,10 @@ import re
 from collections import Counter
 from typing import List, Tuple, Optional, Dict
 
+import numpy as np
 import ollama
+
+from .utils import get_device
 
 # Lazy load cross-encoder to avoid import overhead when not using reranking
 _cross_encoder_model = None
@@ -238,10 +241,11 @@ def _get_cross_encoder(model_name: str):
                 "Install it with: pip install sentence-transformers"
             )
         
-        logger.info(f"Loading cross-encoder model: {model_name}")
-        _cross_encoder_model = CrossEncoder(model_name)
+        device = get_device()
+        logger.info(f"Loading cross-encoder model: {model_name} on {device}")
+        _cross_encoder_model = CrossEncoder(model_name, device=device)
         _cross_encoder_model_name = model_name
-        logger.info(f"Cross-encoder model loaded successfully")
+        logger.info(f"Cross-encoder model loaded successfully on {device}")
     
     return _cross_encoder_model
 
@@ -282,7 +286,6 @@ def rerank_with_cross_encoder(
     
     # Normalize scores to 0-1 range
     # Cross-encoder scores can be unbounded, so we normalize them
-    import numpy as np
     min_score, max_score = float(np.min(scores)), float(np.max(scores))
     if max_score > min_score:
         normalized_scores = [(s - min_score) / (max_score - min_score) for s in scores]

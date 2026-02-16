@@ -70,14 +70,7 @@ Examples:
         "--rerank",
         action="store_true",
         default=False,
-        help="Enable cross-encoder reranking"
-    )
-    parser.add_argument(
-        "--reranker",
-        type=str,
-        choices=["bge", "ms-marco"],
-        default="bge",
-        help="Reranker model: 'bge' (BAAI/bge-reranker-base) or 'ms-marco' (cross-encoder/ms-marco-MiniLM-L-6-v2)"
+        help="Enable cross-encoder reranking (uses BAAI/bge-reranker-base)"
     )
     
     args = parser.parse_args()
@@ -91,6 +84,9 @@ Examples:
         logger.info("Using default configuration")
     
     # Override config with CLI args
+    # Note: CLI defaults to semantic-only for faster interactive use,
+    # while config defaults to hybrid=True for programmatic use where
+    # quality is typically prioritized over latency.
     if args.hybrid:
         config.retrieval.use_hybrid_search = True
         config.retrieval.rrf_weight = args.rrf_weight
@@ -100,10 +96,7 @@ Examples:
     # Configure reranking
     if args.rerank:
         config.retrieval.use_reranking = True
-        if args.reranker == "ms-marco":
-            config.model.reranker_model = ModelConfig.RERANKER_MS_MARCO
-        else:
-            config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
+        config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
     
     # Load data
     collection_suffix = None
@@ -172,7 +165,7 @@ Examples:
             sys.exit(1)
     
     search_mode = "hybrid" if config.retrieval.use_hybrid_search else "semantic"
-    rerank_info = f" + rerank ({args.reranker})" if config.retrieval.use_reranking else ""
+    rerank_info = " + rerank (bge)" if config.retrieval.use_reranking else ""
     indexed_count = pipeline.vector_db.size()
     print("\n" + "="*60)
     print(f"RAG-Lite: {dataset_name}")

@@ -90,7 +90,7 @@ def load_config_file(config_path: str) -> List[Dict]:
         - name: str (required) - Display name for the configuration
         - use_hybrid_search: bool - Enable BM25 + semantic fusion
         - use_reranking: bool - Enable cross-encoder reranking
-        - reranker_model: str - Cross-encoder model ('bge' or 'ms-marco')
+        - reranker_model: str - Cross-encoder model (default: 'bge')
         - rrf_k: int - RRF constant (higher = more uniform ranking)
         - rrf_weight: float - Semantic weight (0.0=all BM25, 1.0=all semantic)
         - retrieve_k: int - Candidates from each search method
@@ -153,7 +153,7 @@ def run_evaluation(
         config_file: Path to JSON config file with configurations to compare
         use_hybrid: Enable hybrid search (BM25 + semantic)
         use_reranking: Enable cross-encoder reranking
-        reranker_model: Reranker model ('bge' or 'ms-marco')
+        reranker_model: Reranker model (default: 'bge' = BAAI/bge-reranker-base)
         interactive: Run interactive query mode after evaluation
     """
     print("\n" + "=" * 70)
@@ -214,11 +214,8 @@ def run_evaluation(
     config.retrieval.use_hybrid_search = use_hybrid
     config.retrieval.use_reranking = use_reranking
     
-    # Set reranker model
-    if reranker_model == "ms-marco":
-        config.model.reranker_model = ModelConfig.RERANKER_MS_MARCO
-    else:
-        config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
+    # Set reranker model (BGE is the only recommended option)
+    config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
     
     # Update collection name to be unique per dataset
     config.storage.collection_name = f"eval_{dataset_name}"
@@ -255,13 +252,10 @@ def run_evaluation(
             {"name": "hybrid_bm25+semantic", "use_hybrid_search": True, "use_reranking": False},
         ]
         
-        # Add reranking configurations (cross-encoder is much faster than LLM-based)
+        # Add reranking configuration (cross-encoder is much faster than LLM-based)
         if len(eval_examples) <= 100:
             configurations.append(
                 {"name": "hybrid+rerank_bge", "use_hybrid_search": True, "use_reranking": True, "reranker_model": "bge"}
-            )
-            configurations.append(
-                {"name": "hybrid+rerank_msmarco", "use_hybrid_search": True, "use_reranking": True, "reranker_model": "ms-marco"}
             )
     
     if configurations:
@@ -401,9 +395,8 @@ Config File Format (JSON):
     parser.add_argument(
         "--reranker",
         type=str,
-        choices=["bge", "ms-marco"],
         default="bge",
-        help="Reranker model: 'bge' (BAAI/bge-reranker-base) or 'ms-marco' (cross-encoder/ms-marco-MiniLM-L-6-v2)"
+        help="Reranker model (default: BAAI/bge-reranker-base)"
     )
     
     parser.add_argument(

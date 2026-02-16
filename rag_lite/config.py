@@ -53,9 +53,8 @@ def _get_env_str(key: str, default: str) -> str:
 class ModelConfig:
     """Configuration for AI models."""
     
-    # Cross-encoder reranker model options
+    # Cross-encoder reranker model (BGE is recommended - good quality/speed tradeoff)
     RERANKER_BGE_BASE: str = "BAAI/bge-reranker-base"
-    RERANKER_MS_MARCO: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     
     embedding_model: str = "BAAI/bge-base-en-v1.5"  # HuggingFace model for sentence-transformers
     language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
@@ -97,8 +96,10 @@ class RetrievalConfig:
     fusion_k: int = 20            # Candidates after RRF fusion (rerank pool)
     
     # Feature flags
+    # Note: Config defaults to hybrid=True for quality, but CLI (main.py) defaults
+    # to semantic-only for faster interactive use. Use --hybrid flag to enable.
     use_hybrid_search: bool = True   # Use semantic + BM25 with RRF (False = semantic only)
-    use_reranking: bool = False
+    use_reranking: bool = False      # Disabled by default (marginal benefit, high latency)
     
     # RRF parameters
     rrf_k: int = 60               # RRF constant (standard value)

@@ -69,9 +69,9 @@ All settings are configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_MODEL` | `hf.co/CompendiumLabs/bge-base-en-v1.5-gguf` | Embedding model |
-| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Generation model |
-| `OLLAMA_BASE_URL` | `None` | Custom Ollama endpoint |
+| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | HuggingFace embedding model (sentence-transformers) |
+| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Ollama model for generation |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder model for reranking |
 
 **Storage:**
 
@@ -114,11 +114,8 @@ python main.py --file path/to/data.txt
 # With hybrid search
 python main.py --dataset ragqa --hybrid --rrf-weight 0.7
 
-# With cross-encoder reranking (bge-reranker-base by default)
+# With cross-encoder reranking (BGE reranker)
 python main.py --dataset ragqa --hybrid --rerank
-
-# With ms-marco reranker (faster, English-only)
-python main.py --dataset ragqa --hybrid --rerank --reranker ms-marco
 ```
 
 **Programmatic:**
@@ -129,9 +126,9 @@ from rag_lite.data_loader import load_text_file
 
 config = Config.from_env()
 
-# Enable reranking with a specific model
+# Enable reranking (BGE cross-encoder)
 config.retrieval.use_reranking = True
-config.model.reranker_model = ModelConfig.RERANKER_MS_MARCO  # or RERANKER_BGE_BASE
+config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
 
 pipeline = RAGPipeline(config)
 
@@ -170,13 +167,12 @@ Query
 - Faster, uses only ChromaDB's HNSW index
 - Good for smaller datasets or when keyword matching isn't needed
 
-**Cross-Encoder Reranking** (optional):
-- Uses sentence-transformers CrossEncoder models for relevance scoring
+**Cross-Encoder Reranking** (optional, disabled by default):
+- Uses `BAAI/bge-reranker-base` for relevance scoring
 - Much faster and more reliable than LLM-based reranking
-- Available models:
-  - `BAAI/bge-reranker-base` (default) - Good quality, supports English + Chinese
-  - `cross-encoder/ms-marco-MiniLM-L-6-v2` - Faster, English-only
+- Benchmarks show marginal quality improvement (~2% R@3) at significant latency cost
 - Enable with `USE_RERANKING=true` or `--rerank` flag
+- Recommended only when quality is critical and latency is acceptable
 
 ## Storage
 
