@@ -15,8 +15,7 @@ RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, runnin
 └─────────────┘     │  (ChromaDB)  │     └─────────────┘     │  (Ollama)  │
                     └──────────────┘                         └────────────┘
                            │                    │
-               sentence-transformers    Hybrid Search + Rerank
-                   (BGE embeddings)
+                    Embeddings (BGE)    Hybrid Search + Rerank
 ```
 
 **Components:**
@@ -25,7 +24,7 @@ RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, runnin
 |--------|-------------|
 | `data_loader` | Text file ingestion with UTF-8 encoding |
 | `vector_db` | ChromaDB-backed persistent vector storage |
-| `retrieval` | Semantic search, BM25, RRF fusion, LLM reranking |
+| `retrieval` | Semantic search, BM25, RRF fusion, cross-encoder reranking |
 | `generation` | Context-aware response generation |
 | `rag_pipeline` | Orchestration layer |
 | `config` | Environment-based configuration |
@@ -70,8 +69,9 @@ All settings are configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | HuggingFace embedding model (sentence-transformers) |
-| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Ollama LLM for generation |
+| `EMBEDDING_MODEL` | `hf.co/CompendiumLabs/bge-base-en-v1.5-gguf` | Embedding model |
+| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Generation model |
+| `OLLAMA_BASE_URL` | `None` | Custom Ollama endpoint |
 
 **Storage:**
 
@@ -89,7 +89,7 @@ All settings are configured via environment variables:
 | `RETRIEVE_K` | `50` | Candidates per search method |
 | `FUSION_K` | `20` | Candidates after RRF fusion |
 | `USE_HYBRID_SEARCH` | `true` | Enable hybrid search (semantic + BM25 + RRF) |
-| `USE_RERANKING` | `false` | Enable LLM-based reranking |
+| `USE_RERANKING` | `false` | Enable cross-encoder reranking |
 | `RRF_K` | `60` | RRF constant (when hybrid enabled) |
 | `BM25_K1` | `1.5` | BM25 term frequency saturation |
 | `BM25_B` | `0.75` | BM25 length normalization |
@@ -113,16 +113,26 @@ python main.py --file path/to/data.txt
 
 # With hybrid search
 python main.py --dataset ragqa --hybrid --rrf-weight 0.7
+
+# With cross-encoder reranking (bge-reranker-base by default)
+python main.py --dataset ragqa --hybrid --rerank
+
+# With ms-marco reranker (faster, English-only)
+python main.py --dataset ragqa --hybrid --rerank --reranker ms-marco
 ```
 
 **Programmatic:**
 
 ```python
-from rag_lite.config import Config
+from rag_lite import Config, ModelConfig, RAGPipeline
 from rag_lite.data_loader import load_text_file
-from rag_lite.rag_pipeline import RAGPipeline
 
 config = Config.from_env()
+
+# Enable reranking with a specific model
+config.retrieval.use_reranking = True
+config.model.reranker_model = ModelConfig.RERANKER_MS_MARCO  # or RERANKER_BGE_BASE
+
 pipeline = RAGPipeline(config)
 
 documents = load_text_file("your-data.txt")
@@ -147,7 +157,7 @@ Query
                                               │
                                         top 20 (fusion_k)
                                               │
-                                   (optional LLM rerank)
+                               (optional cross-encoder rerank)
                                               │
                                         top 3 (top_n)
 ```
@@ -160,9 +170,13 @@ Query
 - Faster, uses only ChromaDB's HNSW index
 - Good for smaller datasets or when keyword matching isn't needed
 
-**Reranking** (optional):
-- LLM-based relevance scoring
-- Enable with `USE_RERANKING=true`
+**Cross-Encoder Reranking** (optional):
+- Uses sentence-transformers CrossEncoder models for relevance scoring
+- Much faster and more reliable than LLM-based reranking
+- Available models:
+  - `BAAI/bge-reranker-base` (default) - Good quality, supports English + Chinese
+  - `cross-encoder/ms-marco-MiniLM-L-6-v2` - Faster, English-only
+- Enable with `USE_RERANKING=true` or `--rerank` flag
 
 ## Storage
 
@@ -204,9 +218,9 @@ See [evaluation/README.md](evaluation/README.md) for detailed documentation on d
 - [ ] Add `evaluation_batch`, which needs replace chroma
 - [ ] Add proper document chunking (split long docs into overlapping chunks with sentence boundaries)
 - [ ] Add Semantic F1 metric (LLM as a judge)
-- [ ] Add Reranking via cross-encoder, replacing LLM reranker
+- [x] Add Reranking via cross-encoder, replacing LLM reranker
 - [ ] Compare LLM models
-- [ ] Compare embedding models
+- [ ] Compare embeding models (via sentence transformer)
 
 
 ## Security

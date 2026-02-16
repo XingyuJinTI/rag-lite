@@ -6,7 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
-from rag_lite.config import Config
+from rag_lite.config import Config, ModelConfig
 from rag_lite.data_loader import load_text_file, load_ragqa_corpus
 from rag_lite.rag_pipeline import RAGPipeline
 
@@ -66,6 +66,19 @@ Examples:
         default=False,
         help="Force re-indexing even if data already exists"
     )
+    parser.add_argument(
+        "--rerank",
+        action="store_true",
+        default=False,
+        help="Enable cross-encoder reranking"
+    )
+    parser.add_argument(
+        "--reranker",
+        type=str,
+        choices=["bge", "ms-marco"],
+        default="bge",
+        help="Reranker model: 'bge' (BAAI/bge-reranker-base) or 'ms-marco' (cross-encoder/ms-marco-MiniLM-L-6-v2)"
+    )
     
     args = parser.parse_args()
     
@@ -83,6 +96,14 @@ Examples:
         config.retrieval.rrf_weight = args.rrf_weight
     else:
         config.retrieval.use_hybrid_search = False
+    
+    # Configure reranking
+    if args.rerank:
+        config.retrieval.use_reranking = True
+        if args.reranker == "ms-marco":
+            config.model.reranker_model = ModelConfig.RERANKER_MS_MARCO
+        else:
+            config.model.reranker_model = ModelConfig.RERANKER_BGE_BASE
     
     # Load data
     collection_suffix = None
@@ -151,10 +172,11 @@ Examples:
             sys.exit(1)
     
     search_mode = "hybrid" if config.retrieval.use_hybrid_search else "semantic"
+    rerank_info = f" + rerank ({args.reranker})" if config.retrieval.use_reranking else ""
     indexed_count = pipeline.vector_db.size()
     print("\n" + "="*60)
     print(f"RAG-Lite: {dataset_name}")
-    print(f"Documents: {indexed_count:,} | Search: {search_mode}")
+    print(f"Documents: {indexed_count:,} | Search: {search_mode}{rerank_info}")
     print("="*60)
     print("Type 'quit' or 'exit' to stop\n")
     
