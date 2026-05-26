@@ -1,21 +1,19 @@
 """
-Vector database implementation using ChromaDB for persistent storage.
+Vector database implementation using PostgreSQL + pgvector.
 
-This module provides a ChromaDB-backed vector database for storing document chunks
-and their corresponding embeddings with automatic persistence.
-
-Uses sentence-transformers for fast, efficient local embeddings.
-Also includes SQLite FTS5 for fast full-text keyword search with BM25 ranking.
+Replaces ChromaDB (vector store) and SQLite FTS5 (keyword store) with a single
+Postgres table — pgvector HNSW for ANN search, tsvector GENERATED column for
+full-text search. One store, one connection, ACID guarantees.
 """
 
 import logging
-import os
-import sqlite3
-from typing import List, Tuple, Optional
 import hashlib
+from typing import List, Tuple, Optional
 
-import chromadb
-from chromadb.config import Settings
+import numpy as np
+import psycopg2
+import psycopg2.extras
+from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
 from .utils import get_device
@@ -25,458 +23,320 @@ logger = logging.getLogger(__name__)
 
 class VectorDB:
     """
-    ChromaDB-backed vector database for storing document chunks and embeddings.
-    
-    Provides persistent storage with automatic embedding generation via sentence-transformers.
-    Data persists across restarts when using a persist_directory.
+    PostgreSQL + pgvector vector database.
+
+    Schema
+    ------
+    chunks (chunk_id, collection, content, embedding vector(N), content_tsv tsvector)
+      - HNSW index on embedding (cosine)
+      - GIN  index on content_tsv (full-text)
+
+    The tsvector column is GENERATED ALWAYS, so FTS is always in sync —
+    no separate SQLite sidecar, no manual rebuild.
     """
 
-    # Max chars per chunk (~250-333 tokens, fits 512-token models)
     MAX_CHUNK_CHARS = 500
 
     def __init__(
         self,
         embedding_model: str,
-        persist_directory: str = "./chroma_db",
+        pg_dsn: str,
         collection_name: str = "rag_lite",
-        max_chunk_chars: Optional[int] = None
+        max_chunk_chars: Optional[int] = None,
+        embedding_dim: int = 768,
     ):
         """
-        Initialize the vector database with ChromaDB backend.
-        
         Args:
-            embedding_model: HuggingFace model name (e.g., "BAAI/bge-base-en-v1.5")
-            persist_directory: Directory for ChromaDB persistence
-            collection_name: Name of the ChromaDB collection
-            max_chunk_chars: Maximum chars per chunk before truncation (default 500)
+            embedding_model: HuggingFace model name (e.g. "BAAI/bge-base-en-v1.5")
+            pg_dsn:          PostgreSQL connection string
+                             e.g. "postgresql://user:pass@localhost:5432/rag"
+            collection_name: Logical namespace stored as a column — multiple
+                             collections share one table.
+            max_chunk_chars: Hard truncation limit per chunk (default 500).
+            embedding_dim:   Dimension of the embedding model output.
+                             Must match the model. Default 768 (bge-base-en-v1.5).
         """
         self.embedding_model = embedding_model
-        self.persist_directory = persist_directory
+        self.pg_dsn = pg_dsn
         self.collection_name = collection_name
         self.max_chunk_chars = max_chunk_chars or self.MAX_CHUNK_CHARS
-        
-        # Lazy load embedding model (loaded on first use)
-        self._model = None
-        
-        # Initialize ChromaDB with persistence
-        self._client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        
-        # Get or create collection
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"}  # Use cosine similarity
-        )
-        
-        # Initialize FTS5 for keyword search with persistent connection
-        self._fts_db_path = os.path.join(persist_directory, f"{collection_name}_fts.db")
-        self._fts_conn = sqlite3.connect(self._fts_db_path, check_same_thread=False)
-        self._init_fts()
-        
-        # Check if FTS index needs rebuilding (out of sync with ChromaDB)
-        self._sync_fts_if_needed()
-        
+        self.embedding_dim = embedding_dim
+
+        self._model: Optional[SentenceTransformer] = None
+
+        self._conn = psycopg2.connect(pg_dsn)
+        register_vector(self._conn)
+        self._init_schema()
+
         logger.info(
-            f"Initialized ChromaDB at '{persist_directory}' "
-            f"with collection '{collection_name}' ({self._collection.count()} documents)"
+            f"pgvector DB ready — collection='{collection_name}', "
+            f"dim={embedding_dim}, docs={self.size()}"
         )
 
-    def _init_fts(self) -> None:
-        """Initialize SQLite FTS5 database for keyword search."""
-        cursor = self._fts_conn.cursor()
-        
-        # Create FTS5 virtual table with BM25 support
-        cursor.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-                chunk_id,
-                content,
-                tokenize='porter unicode61'
-            )
-        """)
-        
-        # Create a regular table to track indexed chunks
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS indexed_chunks (
-                chunk_id TEXT PRIMARY KEY
-            )
-        """)
-        
-        self._fts_conn.commit()
-    
-    def _sync_fts_if_needed(self) -> None:
-        """Check if FTS index is in sync with ChromaDB and rebuild if needed."""
-        chroma_count = self._collection.count()
-        
-        if chroma_count == 0:
-            return
-        
-        cursor = self._fts_conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM indexed_chunks")
-        fts_count = cursor.fetchone()[0]
-        
-        # If counts differ significantly, rebuild
-        if fts_count < chroma_count * 0.9:  # Allow 10% tolerance
-            logger.info(f"FTS index out of sync ({fts_count} vs {chroma_count}), rebuilding...")
-            self.rebuild_fts_index(show_progress=True)
-    
-    def _add_to_fts(self, chunk_ids: List[str], chunks: List[str]) -> None:
-        """Add chunks to FTS5 index."""
-        if not chunk_ids:
-            return
-            
-        cursor = self._fts_conn.cursor()
-        
-        # Check which chunks are already indexed
-        placeholders = ','.join('?' * len(chunk_ids))
-        cursor.execute(
-            f"SELECT chunk_id FROM indexed_chunks WHERE chunk_id IN ({placeholders})",
-            chunk_ids
-        )
-        existing = {row[0] for row in cursor.fetchall()}
-        
-        # Insert only new chunks
-        new_data = [
-            (cid, chunk) for cid, chunk in zip(chunk_ids, chunks)
-            if cid not in existing
-        ]
-        
-        if new_data:
-            cursor.executemany(
-                "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
-                new_data
-            )
-            cursor.executemany(
-                "INSERT INTO indexed_chunks (chunk_id) VALUES (?)",
-                [(cid,) for cid, _ in new_data]
-            )
-            self._fts_conn.commit()
-    
-    def _generate_id(self, chunk: str) -> str:
-        """Generate a deterministic ID for a chunk."""
-        return hashlib.sha256(chunk.encode()).hexdigest()[:16]
+    # ------------------------------------------------------------------
+    # Schema bootstrap
+    # ------------------------------------------------------------------
+
+    def _init_schema(self) -> None:
+        """Create extension, table, and indexes idempotently."""
+        with self._conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS chunks (
+                    chunk_id    TEXT                    NOT NULL,
+                    collection  TEXT                    NOT NULL,
+                    content     TEXT                    NOT NULL,
+                    embedding   vector({self.embedding_dim}) NOT NULL,
+                    content_tsv tsvector GENERATED ALWAYS AS
+                                (to_tsvector('english', content)) STORED,
+                    PRIMARY KEY (chunk_id, collection)
+                )
+            """)
+
+            # HNSW index: fast approximate nearest-neighbour with cosine distance
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
+                ON chunks USING hnsw (embedding vector_cosine_ops)
+            """)
+
+            # GIN index for full-text search
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS chunks_tsv_gin_idx
+                ON chunks USING gin (content_tsv)
+            """)
+
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Embedding helpers
+    # ------------------------------------------------------------------
 
     def _get_model(self) -> SentenceTransformer:
-        """Get embedding model (lazy loaded on first use)."""
         if self._model is None:
             device = get_device()
             logger.info(f"Loading embedding model: {self.embedding_model} on {device}")
             self._model = SentenceTransformer(self.embedding_model, device=device)
-            logger.info(f"Loaded embedding model with dimension {self._model.get_sentence_embedding_dimension()}")
+            actual_dim = self._model.get_sentence_embedding_dimension()
+            if actual_dim != self.embedding_dim:
+                raise ValueError(
+                    f"Model produces {actual_dim}-dim embeddings but "
+                    f"embedding_dim={self.embedding_dim} was configured. "
+                    "Update StorageConfig.embedding_dim or clear the database."
+                )
+            logger.info(f"Embedding model loaded (dim={actual_dim})")
         return self._model
 
     def _truncate_text(self, text: str) -> str:
-        """Truncate text to max_chunk_chars, breaking at word boundary."""
         if len(text) <= self.max_chunk_chars:
             return text
-        
-        # Find last space before limit
         truncated = text[:self.max_chunk_chars]
-        last_space = truncated.rfind(' ')
-        if last_space > self.max_chunk_chars * 0.8:  # Only use if > 80% of max
+        last_space = truncated.rfind(" ")
+        if last_space > self.max_chunk_chars * 0.8:
             truncated = truncated[:last_space]
-        
-        logger.debug(f"Truncated chunk from {len(text)} to {len(truncated)} chars")
         return truncated
 
-    def _get_embedding(self, text: str) -> List[float]:
-        """Generate embedding for a single text."""
-        text = self._truncate_text(text)
-        model = self._get_model()
-        embedding = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
-        return embedding.tolist()
+    def _generate_id(self, chunk: str) -> str:
+        return hashlib.sha256(chunk.encode()).hexdigest()[:16]
 
-    def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts in parallel."""
+    def _embed(self, text: str) -> np.ndarray:
+        text = self._truncate_text(text)
+        return self._get_model().encode(text, convert_to_numpy=True, show_progress_bar=False)
+
+    def _embed_batch(self, texts: List[str]) -> np.ndarray:
         texts = [self._truncate_text(t) for t in texts]
-        model = self._get_model()
-        embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-        return embeddings.tolist()
+        return self._get_model().encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
+    # ------------------------------------------------------------------
+    # Write operations
+    # ------------------------------------------------------------------
 
     def add_chunk(self, chunk: str) -> None:
-        """
-        Add a chunk to the database with its embedding.
-        
-        Args:
-            chunk: Text chunk to add
-        """
+        """Add a single chunk (skipped if duplicate)."""
         chunk_id = self._generate_id(chunk)
-        
-        # Check if already exists
-        existing = self._collection.get(ids=[chunk_id])
-        if existing['ids']:
-            logger.debug(f"Chunk already exists: {chunk_id}")
-            return
-        
-        try:
-            embedding = self._get_embedding(chunk)
-            self._collection.add(
-                ids=[chunk_id],
-                embeddings=[embedding],
-                documents=[chunk]
+        embedding = self._embed(chunk)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO chunks (chunk_id, collection, content, embedding)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chunk_id, collection) DO NOTHING
+                """,
+                (chunk_id, self.collection_name, chunk, embedding),
             )
-            # Also add to FTS5 index
-            self._add_to_fts([chunk_id], [chunk])
-        except Exception as e:
-            logger.error(f"Failed to add chunk to database: {e}")
-            raise
+        self._conn.commit()
 
-    def add_chunks(self, chunks: List[str], show_progress: bool = True, batch_size: int = 256) -> None:
-        """
-        Add multiple chunks to the database with batch embedding.
-        
-        Args:
-            chunks: List of text chunks to add
-            show_progress: Whether to log progress
-            batch_size: Number of chunks to embed per batch
-        """
-        # Generate IDs and deduplicate (same text = same ID)
-        chunk_id_map = {}  # id -> chunk (keeps first occurrence)
+    def add_chunks(
+        self,
+        chunks: List[str],
+        show_progress: bool = True,
+        batch_size: int = 256,
+    ) -> None:
+        """Batch-embed and insert chunks; duplicates are silently skipped."""
+        # Deduplicate within the incoming list (same text → same SHA256 id)
+        chunk_id_map: dict = {}
         for chunk in chunks:
-            chunk_id = self._generate_id(chunk)
-            if chunk_id not in chunk_id_map:
-                chunk_id_map[chunk_id] = chunk
-        
-        # Check which IDs already exist in the database (batch to avoid SQL variable limit)
-        unique_ids = list(chunk_id_map.keys())
-        existing_ids = set()
-        
-        # SQLite has a limit of ~999 variables per query, use 500 to be safe
-        check_batch_size = 500
-        for i in range(0, len(unique_ids), check_batch_size):
-            batch_ids = unique_ids[i:i + check_batch_size]
-            existing = self._collection.get(ids=batch_ids)
-            existing_ids.update(existing['ids'])
-        
-        # Filter to only new chunks
-        new_chunks = [
-            (chunk_id_map[chunk_id], chunk_id) 
-            for chunk_id in unique_ids
-            if chunk_id not in existing_ids
-        ]
-        
-        duplicates_in_input = len(chunks) - len(unique_ids)
-        if duplicates_in_input > 0:
-            logger.info(f"Deduplicated {duplicates_in_input} duplicate chunks from input")
-        
-        if not new_chunks:
-            logger.info("All chunks already exist in database")
+            cid = self._generate_id(chunk)
+            if cid not in chunk_id_map:
+                chunk_id_map[cid] = chunk
+
+        dropped = len(chunks) - len(chunk_id_map)
+        if dropped:
+            logger.info(f"Deduplicated {dropped} duplicate chunks from input")
+
+        items = list(chunk_id_map.items())  # [(id, text), ...]
+        if not items:
+            logger.info("All chunks already exist in the database")
             return
-        
-        logger.info(f"Adding {len(new_chunks)} new chunks ({len(existing_ids)} already exist)")
-        
-        # Process in batches
-        total = len(new_chunks)
+
+        logger.info(f"Inserting up to {len(items)} chunks into pgvector…")
+        total = len(items)
+        inserted_total = 0
+
         for i in range(0, total, batch_size):
-            batch = new_chunks[i:i + batch_size]
-            batch_chunks = [chunk for chunk, _ in batch]
-            batch_ids = [chunk_id for _, chunk_id in batch]
-            
-            try:
-                embeddings = self._get_embeddings_batch(batch_chunks)
-                self._collection.add(
-                    ids=batch_ids,
-                    embeddings=embeddings,
-                    documents=batch_chunks
+            batch = items[i : i + batch_size]
+            batch_ids = [cid for cid, _ in batch]
+            batch_texts = [text for _, text in batch]
+            embeddings = self._embed_batch(batch_texts)
+
+            rows = [
+                (cid, self.collection_name, text, emb)
+                for cid, text, emb in zip(batch_ids, batch_texts, embeddings)
+            ]
+
+            with self._conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO chunks (chunk_id, collection, content, embedding)
+                    VALUES %s
+                    ON CONFLICT (chunk_id, collection) DO NOTHING
+                    """,
+                    rows,
                 )
-                
-                # Also add to FTS5 index
-                self._add_to_fts(batch_ids, batch_chunks)
-                
-                if show_progress:
-                    processed = min(i + batch_size, total)
-                    logger.info(f"Added chunks {processed}/{total} to the database")
-                    
-            except Exception as e:
-                logger.error(f"Failed to add batch to database: {e}")
-                raise
+                inserted_total += cur.rowcount
+            self._conn.commit()
+
+            if show_progress:
+                processed = min(i + batch_size, total)
+                logger.info(f"Processed {processed}/{total} chunks ({inserted_total} inserted)")
+
+    # ------------------------------------------------------------------
+    # Read operations
+    # ------------------------------------------------------------------
 
     def get_all(self) -> List[Tuple[str, List[float]]]:
-        """
-        Get all chunks and their embeddings.
-        
-        Returns:
-            List of (chunk, embedding) tuples
-        """
-        results = self._collection.get(include=['documents', 'embeddings'])
-        
-        if not results['documents']:
-            return []
-        
-        return list(zip(results['documents'], results['embeddings']))
+        """Return all (content, embedding) pairs for this collection."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT content, embedding FROM chunks WHERE collection = %s",
+                (self.collection_name,),
+            )
+            return [(row[0], list(row[1])) for row in cur.fetchall()]
 
-    def search(
-        self,
-        query: str,
-        n_results: int = 10
-    ) -> List[Tuple[str, float]]:
+    def search(self, query: str, n_results: int = 10) -> List[Tuple[str, float]]:
         """
-        Search for similar chunks using ChromaDB's native search.
-        
-        Args:
-            query: Query text
-            n_results: Number of results to return
-            
-        Returns:
-            List of (chunk, similarity_score) tuples
-        """
-        query_embedding = self._get_embedding(query)
-        
-        results = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            include=['documents', 'distances']
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
-            return []
-        
-        # ChromaDB returns distances, convert to similarity (1 - distance for cosine)
-        chunks = results['documents'][0]
-        distances = results['distances'][0]
-        similarities = [1 - d for d in distances]
-        
-        return list(zip(chunks, similarities))
+        Semantic search using pgvector HNSW (cosine).
 
-    def search_fts(
-        self,
-        query: str,
-        n_results: int = 50
-    ) -> List[Tuple[str, float]]:
+        Returns list of (chunk, similarity) sorted by descending similarity.
+        Similarity = 1 - cosine_distance, so 1.0 is identical.
         """
-        Search for chunks using FTS5 full-text search with BM25 ranking.
-        
-        This is much faster than in-memory BM25 as the index is pre-built.
-        
-        Args:
-            query: Search query (supports FTS5 syntax like AND, OR, NOT, "phrases")
-            n_results: Maximum number of results to return
-            
-        Returns:
-            List of (chunk, bm25_score) tuples sorted by relevance
+        q_emb = self._embed(query)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT content,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM chunks
+                WHERE collection = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (q_emb, self.collection_name, q_emb, n_results),
+            )
+            return [(row[0], float(row[1])) for row in cur.fetchall()]
+
+    def search_fts(self, query: str, n_results: int = 50) -> List[Tuple[str, float]]:
         """
-        cursor = self._fts_conn.cursor()
-        
-        # Escape special FTS5 characters and build query
-        # Split into words, escape each, join with implicit AND
-        words = query.split()
-        if not words:
+        Full-text search using PostgreSQL tsvector + ts_rank.
+
+        Scores are normalized to [0, 1] to match the contract expected by
+        the RRF fusion layer.
+        """
+        if not query.strip():
             return []
-        
-        # Escape special characters for FTS5
-        escaped_words = []
-        for word in words:
-            # Remove FTS5 special chars, keep alphanumeric
-            clean_word = ''.join(c for c in word if c.isalnum())
-            if clean_word:
-                escaped_words.append(f'"{clean_word}"')
-        
-        if not escaped_words:
-            return []
-        
-        # Use OR for better recall (AND is too strict for short queries)
-        fts_query = ' OR '.join(escaped_words)
-        
-        try:
-            # BM25 returns negative scores (more negative = more relevant)
-            # We negate to get positive scores where higher = better
-            cursor.execute("""
-                SELECT content, -bm25(chunks_fts) as score
-                FROM chunks_fts
-                WHERE chunks_fts MATCH ?
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT content,
+                       ts_rank(content_tsv, plainto_tsquery('english', %s)) AS score
+                FROM chunks
+                WHERE collection = %s
+                  AND content_tsv @@ plainto_tsquery('english', %s)
                 ORDER BY score DESC
-                LIMIT ?
-            """, (fts_query, n_results))
-            
-            results = [(row[0], row[1]) for row in cursor.fetchall()]
-            
-        except sqlite3.OperationalError as e:
-            # If query syntax is invalid, try simpler approach
-            logger.debug(f"FTS5 query failed: {e}, trying simpler query")
-            simple_query = ' OR '.join(f'"{w}"' for w in words if w.isalnum())
-            if simple_query:
-                cursor.execute("""
-                    SELECT content, -bm25(chunks_fts) as score
-                    FROM chunks_fts
-                    WHERE chunks_fts MATCH ?
-                    ORDER BY score DESC
-                    LIMIT ?
-                """, (simple_query, n_results))
-                results = [(row[0], row[1]) for row in cursor.fetchall()]
-            else:
-                results = []
-        
-        # Normalize scores to 0-1 range
+                LIMIT %s
+                """,
+                (query, self.collection_name, query, n_results),
+            )
+            results = [(row[0], float(row[1])) for row in cur.fetchall()]
+
         if results:
-            max_score = max(score for _, score in results) if results else 1.0
+            max_score = max(s for _, s in results)
             if max_score > 0:
-                results = [(chunk, score / max_score) for chunk, score in results]
-        
+                results = [(chunk, s / max_score) for chunk, s in results]
+
         return results
 
+    # ------------------------------------------------------------------
+    # Admin operations
+    # ------------------------------------------------------------------
+
     def size(self) -> int:
-        """Get the number of chunks in the database."""
-        return self._collection.count()
+        """Count chunks in this collection."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM chunks WHERE collection = %s",
+                (self.collection_name,),
+            )
+            return cur.fetchone()[0]
 
     def clear(self) -> None:
-        """Clear all data from the collection and FTS index."""
-        self._client.delete_collection(self.collection_name)
-        self._collection = self._client.create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": "cosine"}
-        )
-        
-        # Clear FTS5 index
-        cursor = self._fts_conn.cursor()
-        cursor.execute("DELETE FROM chunks_fts")
-        cursor.execute("DELETE FROM indexed_chunks")
-        self._fts_conn.commit()
-        
-        logger.info("Vector database and FTS index cleared")
+        """Delete all chunks in this collection."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM chunks WHERE collection = %s",
+                (self.collection_name,),
+            )
+        self._conn.commit()
+        logger.info(f"Cleared collection '{self.collection_name}'")
+
+    def delete_collection(self) -> None:
+        """Alias for clear() — removes all rows for this collection."""
+        self.clear()
+        logger.info(f"Deleted collection '{self.collection_name}'")
 
     def rebuild_fts_index(self, show_progress: bool = True) -> None:
         """
-        Rebuild FTS5 index from ChromaDB data.
-        
-        Useful if FTS index is missing, corrupted, or out of sync.
-        
-        Args:
-            show_progress: Whether to log progress
+        No-op: the tsvector column is GENERATED ALWAYS, so it is always
+        in sync with content — no manual rebuild is ever needed.
         """
-        # Get all documents from ChromaDB (without embeddings for speed)
-        results = self._collection.get(include=['documents'])
-        
-        if not results['documents']:
-            logger.info("No documents to index")
-            return
-        
-        chunks = results['documents']
-        chunk_ids = results['ids']
-        
-        logger.info(f"Rebuilding FTS index for {len(chunks)} documents...")
-        
-        # Clear existing FTS data
-        cursor = self._fts_conn.cursor()
-        cursor.execute("DELETE FROM chunks_fts")
-        cursor.execute("DELETE FROM indexed_chunks")
-        self._fts_conn.commit()
-        
-        # Add all chunks in batches
-        batch_size = 500
-        total = len(chunks)
-        for i in range(0, total, batch_size):
-            batch_ids = chunk_ids[i:i + batch_size]
-            batch_chunks = chunks[i:i + batch_size]
-            self._add_to_fts(batch_ids, batch_chunks)
-            
-            if show_progress:
-                processed = min(i + batch_size, total)
-                logger.info(f"FTS indexed {processed}/{total} documents")
-        
-        logger.info("FTS index rebuild complete")
+        logger.info(
+            "FTS index is a GENERATED column in PostgreSQL — always in sync, "
+            "no rebuild required."
+        )
 
-    def delete_collection(self) -> None:
-        """Delete the entire collection."""
-        self._client.delete_collection(self.collection_name)
-        logger.info(f"Deleted collection '{self.collection_name}'")
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the database connection."""
+        if self._conn and not self._conn.closed:
+            self._conn.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
