@@ -22,7 +22,9 @@ if requirements_file.exists():
 # Core requirements (without optional evaluation dependencies)
 core_requirements = [
     "ollama>=0.1.0",
-    "chromadb>=1.0.0",
+    "psycopg2-binary>=2.9.0",
+    "pgvector>=0.3.0",
+    "numpy>=1.24.0",
 ]
 
 # Optional evaluation requirements

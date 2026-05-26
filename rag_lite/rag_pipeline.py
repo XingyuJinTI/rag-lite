@@ -35,9 +35,10 @@ class RAGPipeline:
         self.config = config
         self.vector_db = VectorDB(
             embedding_model=config.model.embedding_model,
-            persist_directory=config.storage.persist_directory,
+            pg_dsn=config.storage.pg_dsn,
             collection_name=config.storage.collection_name,
             max_chunk_chars=config.storage.max_chunk_chars,
+            embedding_dim=config.storage.embedding_dim,
         )
 
     def index_documents(self, documents: List[str], show_progress: bool = True) -> None:
@@ -53,50 +54,32 @@ class RAGPipeline:
         logger.info(f"Indexed {self.vector_db.size()} documents")
 
     def retrieve(
-        self, 
+        self,
         query: str,
         top_n: Optional[int] = None,
         use_hybrid_search: Optional[bool] = None,
         use_reranking: Optional[bool] = None,
-        # Advanced parameters (override config)
         retrieve_k: Optional[int] = None,
         fusion_k: Optional[int] = None,
         rrf_k: Optional[int] = None,
         rrf_weight: Optional[float] = None,
-        bm25_k1: Optional[float] = None,
-        bm25_b: Optional[float] = None,
         reranker_model: Optional[str] = None,
     ) -> List[Tuple[str, float]]:
         """
         Retrieve relevant chunks for a query.
-        
-        When hybrid is enabled (default):
-        1. Semantic search via ChromaDB HNSW
-        2. BM25 keyword search
-        3. RRF fusion (weighted: semantic=0.7, BM25=0.3 by default)
-        4. Optional cross-encoder reranking
-        
-        When hybrid is disabled:
-        1. Semantic search only
-        2. Optional cross-encoder reranking
-        
-        Args:
-            query: User query
-            top_n: Number of results to return (overrides config)
-            use_hybrid_search: Use hybrid search with RRF (overrides config)
-            use_reranking: Whether to use reranking (overrides config)
-            retrieve_k: Candidates from each search method (overrides config)
-            fusion_k: Candidates after RRF fusion (overrides config)
-            rrf_k: RRF constant, higher = more uniform ranking (overrides config)
-            rrf_weight: Semantic weight in RRF; BM25 gets 1 - rrf_weight (overrides config)
-            bm25_k1: BM25 term frequency saturation (overrides config)
-            bm25_b: BM25 document length normalization (overrides config)
-            reranker_model: Cross-encoder model for reranking (overrides config)
-            
-        Returns:
-            List of (chunk, score) tuples
+
+        Hybrid pipeline (default):
+            1. pgvector HNSW semantic search
+            2. PostgreSQL tsvector full-text search
+            3. Weighted RRF fusion (semantic=0.7, tsvector=0.3)
+            4. Optional cross-encoder reranking
+
+        Semantic-only (use_hybrid_search=False):
+            1. pgvector HNSW semantic search
+            2. Optional cross-encoder reranking
+
+        All parameters override their corresponding config values when provided.
         """
-        # Use provided values or fall back to config
         top_n = top_n if top_n is not None else self.config.retrieval.top_n
         hybrid = use_hybrid_search if use_hybrid_search is not None else self.config.retrieval.use_hybrid_search
         rerank = use_reranking if use_reranking is not None else self.config.retrieval.use_reranking
@@ -104,10 +87,8 @@ class RAGPipeline:
         fusion_k = fusion_k if fusion_k is not None else self.config.retrieval.fusion_k
         rrf_k = rrf_k if rrf_k is not None else self.config.retrieval.rrf_k
         rrf_weight = rrf_weight if rrf_weight is not None else self.config.retrieval.rrf_weight
-        bm25_k1 = bm25_k1 if bm25_k1 is not None else self.config.retrieval.bm25_k1
-        bm25_b = bm25_b if bm25_b is not None else self.config.retrieval.bm25_b
         reranker_model = reranker_model if reranker_model is not None else self.config.model.reranker_model
-        
+
         return retrieve(
             query=query,
             vector_db=self.vector_db,
@@ -117,8 +98,6 @@ class RAGPipeline:
             fusion_k=fusion_k,
             use_hybrid_search=hybrid,
             use_reranking=rerank,
-            bm25_k1=bm25_k1,
-            bm25_b=bm25_b,
             rrf_k=rrf_k,
             rrf_weight=rrf_weight,
             reranker_model=reranker_model,

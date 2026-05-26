@@ -72,18 +72,20 @@ class ModelConfig:
 
 @dataclass
 class StorageConfig:
-    """Configuration for vector storage."""
-    persist_directory: str = "./chroma_db"
+    """Configuration for PostgreSQL + pgvector storage."""
+    pg_dsn: str = "postgresql://localhost/rag_lite"
     collection_name: str = "rag_lite"
     max_chunk_chars: int = 500  # Safety limit (~250-333 tokens for very dense text)
+    embedding_dim: int = 768    # Must match the embedding model (bge-base-en-v1.5 → 768)
 
     @classmethod
     def from_env(cls) -> "StorageConfig":
         """Create StorageConfig from environment variables."""
         return cls(
-            persist_directory=_get_env_str("CHROMA_PERSIST_DIR", cls.persist_directory),
-            collection_name=_get_env_str("CHROMA_COLLECTION", cls.collection_name),
+            pg_dsn=_get_env_str("PG_DSN", cls.pg_dsn),
+            collection_name=_get_env_str("PG_COLLECTION", cls.collection_name),
             max_chunk_chars=_get_env_int("MAX_CHUNK_CHARS", cls.max_chunk_chars),
+            embedding_dim=_get_env_int("EMBEDDING_DIM", cls.embedding_dim),
         )
 
 
@@ -96,16 +98,12 @@ class RetrievalConfig:
     fusion_k: int = 20            # Candidates after RRF fusion (rerank pool)
     
     # Feature flags (CLI defaults to semantic-only; use --hybrid to enable)
-    use_hybrid_search: bool = True   # Semantic + BM25 with RRF
+    use_hybrid_search: bool = False   # Semantic + FT with RRF
     use_reranking: bool = False      # Cross-encoder reranking
     
     # RRF parameters
     rrf_k: int = 60               # RRF constant (standard value)
-    rrf_weight: float = 0.7       # Semantic weight in RRF; BM25 gets 1 - rrf_weight (0.3)
-    
-    # BM25 parameters
-    bm25_k1: float = 1.5          # Term frequency saturation (1.2-2.0)
-    bm25_b: float = 0.75          # Document length normalization (0-1)
+    rrf_weight: float = 0.7       # Semantic weight in RRF; tsvector gets 1 - rrf_weight (0.3)
 
     @classmethod
     def from_env(cls) -> "RetrievalConfig":
@@ -118,8 +116,6 @@ class RetrievalConfig:
             use_reranking=_get_env_bool("USE_RERANKING", cls.use_reranking),
             rrf_k=_get_env_int("RRF_K", cls.rrf_k),
             rrf_weight=_get_env_float("RRF_WEIGHT", cls.rrf_weight),
-            bm25_k1=_get_env_float("BM25_K1", cls.bm25_k1),
-            bm25_b=_get_env_float("BM25_B", cls.bm25_b),
         )
 
 
