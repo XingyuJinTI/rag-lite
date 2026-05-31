@@ -22,9 +22,19 @@ if requirements_file.exists():
 # Core requirements (without optional evaluation dependencies)
 core_requirements = [
     "ollama>=0.1.0",
-    "psycopg2-binary>=2.9.0",
+    "psycopg[binary]>=3.1",
+    "psycopg_pool>=3.2",
     "pgvector>=0.3.0",
     "numpy>=1.24.0",
+    "sentence-transformers>=2.2.0",
+]
+
+# HTTP service requirements (install with pip install -e .[service])
+service_requirements = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
 ]
 
 # Optional evaluation requirements
@@ -45,8 +55,9 @@ setup(
     packages=find_packages(exclude=["tests", "tests.*"]),
     install_requires=core_requirements,
     extras_require={
+        "service": service_requirements,
         "eval": eval_requirements,
-        "all": eval_requirements,
+        "all": service_requirements + eval_requirements,
     },
     python_requires=">=3.8",
     entry_points={
