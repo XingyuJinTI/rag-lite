@@ -39,6 +39,7 @@ class QueryResponse(BaseModel):
     query: str
     answer: str
     sources: List[Chunk]
+    abstained: bool = False
 
 
 class IngestDocument(BaseModel):
