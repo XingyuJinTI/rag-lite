@@ -340,21 +340,19 @@ def ingest_file(
             detail=f"Unsupported file type '{ext}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}",
         )
 
-    # Persist to a temp file so format loaders can open it by path.
-    tmp_path = None
+    # Persist under the *original* filename in a temp dir so the loader derives a
+    # sensible title from the real name (not a random temp stem).
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp.write(file.file.read())
-            tmp_path = tmp.name
-        inserted = pipeline.ingest_file(tmp_path, source=filename, uri=filename)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = os.path.join(tmp_dir, os.path.basename(filename))
+            with open(tmp_path, "wb") as out:
+                out.write(file.file.read())
+            inserted = pipeline.ingest_file(tmp_path, source=filename, uri=filename)
     except UnsupportedFormatError as exc:
         raise HTTPException(status_code=415, detail=str(exc))
     except Exception as exc:
         logger.error("File ingestion failed for %s: %s", filename, exc)
         raise HTTPException(status_code=422, detail=f"Could not ingest '{filename}': {exc}")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
     return FileIngestResponse(
         source=filename,
