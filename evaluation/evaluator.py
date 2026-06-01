@@ -169,7 +169,7 @@ class RAGEvaluator:
             retrieval_times.append(elapsed_ms)
             
             # Extract chunk texts
-            retrieved_chunks = [chunk for chunk, _ in results]
+            retrieved_chunks = [r.content for r in results]
             ground_truth = example.context
             
             # Calculate metrics for this query

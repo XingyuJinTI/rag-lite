@@ -13,23 +13,29 @@ Multi-collection / per-tenant access control is a later phase.
 import contextvars
 import json
 import logging
+import os
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from rag_lite.config import Config
 from rag_lite.rag_pipeline import RAGPipeline
 from rag_lite.service_settings import ServiceSettings
+from rag_lite.types import IngestChunk, RetrievedChunk
+from rag_lite.loaders import SUPPORTED_EXTENSIONS, UnsupportedFormatError
 
 from .schemas import (
     Chunk,
     DeleteResponse,
+    FileIngestResponse,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -38,7 +44,22 @@ from .schemas import (
     QueryResponse,
     SearchRequest,
     SearchResponse,
+    SourceInfo,
+    SourceListResponse,
 )
+
+
+def _to_chunk(c: RetrievedChunk) -> Chunk:
+    """Map a RetrievedChunk (domain type) to the API Chunk schema."""
+    return Chunk(
+        content=c.content,
+        score=c.score,
+        source=c.source,
+        title=c.title,
+        uri=c.uri,
+        page=c.page,
+        metadata=c.metadata or {},
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +212,7 @@ def search(req: SearchRequest, pipeline: RAGPipeline = Depends(get_pipeline)) ->
     )
     return SearchResponse(
         query=req.query,
-        results=[Chunk(content=c, score=s) for c, s in results],
+        results=[_to_chunk(c) for c in results],
     )
 
 
@@ -217,7 +238,7 @@ def query(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> Q
     return QueryResponse(
         query=req.query,
         answer=answer,
-        sources=[Chunk(content=c, score=s) for c, s in retrieved],
+        sources=[_to_chunk(c) for c in retrieved],
     )
 
 
@@ -231,7 +252,7 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
     Retrieve context and stream the generated answer as Server-Sent Events.
 
     Event sequence:
-      event: sources  → JSON array of {content, score}
+      event: sources  → JSON array of source chunks (with provenance)
       event: token    → JSON {text} per generated chunk
       event: done     → empty
     """
@@ -243,7 +264,7 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
     )
 
     def event_stream():
-        sources = [{"content": c, "score": s} for c, s in retrieved]
+        sources = [_to_chunk(c).model_dump() for c in retrieved]
         yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
         try:
             for token in pipeline.generate(req.query, retrieved, stream=True):
@@ -271,13 +292,109 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
     tags=["admin"],
 )
 def ingest(req: IngestRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> IngestResponse:
-    """Index raw text chunks into the served collection. Duplicates are skipped."""
-    inserted = pipeline.vector_db.add_chunks(req.documents, show_progress=False)
+    """
+    Index pre-chunked text into the served collection. Each document may be a bare
+    string or an object with provenance ({text, source, title, uri, metadata}).
+    Duplicates (same source+text) are skipped. For files, use POST /ingest/file.
+    """
+    chunks = []
+    for d in req.documents:
+        if isinstance(d, str):
+            chunks.append(IngestChunk(text=d))
+        else:
+            chunks.append(IngestChunk(
+                text=d.text,
+                source=d.source or "inline",
+                title=d.title,
+                uri=d.uri,
+                metadata=d.metadata or {},
+            ))
+    inserted = pipeline.vector_db.add_chunks(chunks, show_progress=False)
     return IngestResponse(
         received=len(req.documents),
         inserted=inserted,
         collection=pipeline.vector_db.collection_name,
         total_in_collection=pipeline.vector_db.size(),
+    )
+
+
+@app.post(
+    "/ingest/file",
+    response_model=FileIngestResponse,
+    dependencies=[Depends(require_api_key)],
+    tags=["admin"],
+)
+def ingest_file(
+    file: UploadFile = File(...),
+    pipeline: RAGPipeline = Depends(get_pipeline),
+) -> FileIngestResponse:
+    """
+    Upload and index a document (PDF, DOCX, Markdown, or plain text). The file is
+    parsed, token-chunked with provenance, and indexed under source=<filename>.
+    """
+    filename = file.filename or "upload"
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}",
+        )
+
+    # Persist to a temp file so format loaders can open it by path.
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(file.file.read())
+            tmp_path = tmp.name
+        inserted = pipeline.ingest_file(tmp_path, source=filename, uri=filename)
+    except UnsupportedFormatError as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except Exception as exc:
+        logger.error("File ingestion failed for %s: %s", filename, exc)
+        raise HTTPException(status_code=422, detail=f"Could not ingest '{filename}': {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return FileIngestResponse(
+        source=filename,
+        inserted=inserted,
+        collection=pipeline.vector_db.collection_name,
+        total_in_collection=pipeline.vector_db.size(),
+    )
+
+
+@app.get(
+    "/documents",
+    response_model=SourceListResponse,
+    dependencies=[Depends(require_api_key)],
+    tags=["admin"],
+)
+def list_documents(pipeline: RAGPipeline = Depends(get_pipeline)) -> SourceListResponse:
+    """List indexed source documents and their chunk counts."""
+    sources = pipeline.vector_db.list_sources()
+    return SourceListResponse(
+        collection=pipeline.vector_db.collection_name,
+        sources=[SourceInfo(source=s, chunks=n) for s, n in sources],
+    )
+
+
+@app.delete(
+    "/documents",
+    response_model=DeleteResponse,
+    dependencies=[Depends(require_api_key)],
+    tags=["admin"],
+)
+def delete_document(
+    source: str = Query(..., description="Source document to delete (e.g. the filename)."),
+    pipeline: RAGPipeline = Depends(get_pipeline),
+) -> DeleteResponse:
+    """Delete all chunks belonging to one source document."""
+    deleted = pipeline.vector_db.delete_by_source(source)
+    return DeleteResponse(
+        collection=pipeline.vector_db.collection_name,
+        deleted=deleted > 0,
+        deleted_chunks=deleted,
     )
 
 

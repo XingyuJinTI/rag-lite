@@ -9,9 +9,10 @@ safe to share across concurrent requests in the HTTP service: each operation bor
 a connection for the duration of its transaction and returns it to the pool.
 """
 
+import json
 import logging
 import hashlib
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 import numpy as np
 import psycopg
@@ -20,9 +21,28 @@ from psycopg.rows import tuple_row
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
+from .types import IngestChunk, RetrievedChunk
 from .utils import get_device
 
 logger = logging.getLogger(__name__)
+
+# Columns selected for retrieval, in order. Centralized so search/search_fts stay in sync.
+_RETRIEVE_COLS = "chunk_id, content, source, title, uri, page, metadata"
+
+
+def _row_to_retrieved(row: tuple, score: float) -> RetrievedChunk:
+    """Build a RetrievedChunk from a row selected with _RETRIEVE_COLS (+ score)."""
+    chunk_id, content, source, title, uri, page, metadata = row
+    return RetrievedChunk(
+        content=content,
+        score=score,
+        chunk_id=chunk_id,
+        source=source,
+        title=title,
+        uri=uri,
+        page=page,
+        metadata=metadata or {},
+    )
 
 
 class VectorDB:
@@ -111,7 +131,7 @@ class VectorDB:
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        """Create extension, table, and indexes idempotently."""
+        """Create extension, table, indexes, and metadata columns idempotently."""
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -128,6 +148,19 @@ class VectorDB:
                     )
                 """)
 
+                # Provenance columns — added via ALTER so existing tables migrate in
+                # place. All nullable/defaulted, so pre-Phase-2 rows remain valid.
+                cur.execute("""
+                    ALTER TABLE chunks
+                        ADD COLUMN IF NOT EXISTS source      TEXT,
+                        ADD COLUMN IF NOT EXISTS title       TEXT,
+                        ADD COLUMN IF NOT EXISTS uri         TEXT,
+                        ADD COLUMN IF NOT EXISTS page        INT,
+                        ADD COLUMN IF NOT EXISTS chunk_index INT,
+                        ADD COLUMN IF NOT EXISTS metadata    JSONB DEFAULT '{}'::jsonb,
+                        ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT now()
+                """)
+
                 # HNSW index: fast approximate nearest-neighbour with cosine distance
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
@@ -138,6 +171,12 @@ class VectorDB:
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS chunks_tsv_gin_idx
                     ON chunks USING gin (content_tsv)
+                """)
+
+                # Index supporting metadata filters and delete-by-source.
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS chunks_source_idx
+                    ON chunks (collection, source)
                 """)
             # `with conn` commits on clean exit.
 
@@ -160,70 +199,56 @@ class VectorDB:
             logger.info(f"Embedding model loaded (dim={actual_dim})")
         return self._model
 
-    def _truncate_text(self, text: str) -> str:
-        if len(text) <= self.max_chunk_chars:
-            return text
-        truncated = text[:self.max_chunk_chars]
-        last_space = truncated.rfind(" ")
-        if last_space > self.max_chunk_chars * 0.8:
-            truncated = truncated[:last_space]
-        return truncated
-
-    def _generate_id(self, chunk: str) -> str:
-        return hashlib.sha256(chunk.encode()).hexdigest()[:16]
+    @staticmethod
+    def _generate_id(text: str, source: str) -> str:
+        """Content+source hash. Including source keeps identical text from different
+        documents distinct, so each retains its own provenance and citation."""
+        key = f"{source}\x00{text}".encode()
+        return hashlib.sha256(key).hexdigest()[:16]
 
     def _embed(self, text: str) -> np.ndarray:
-        text = self._truncate_text(text)
+        # No char truncation here: the chunker sizes inputs to the model's token
+        # budget. The model still token-truncates as a final safety net.
         return self._get_model().encode(text, convert_to_numpy=True, show_progress_bar=False)
 
     def _embed_batch(self, texts: List[str]) -> np.ndarray:
-        texts = [self._truncate_text(t) for t in texts]
         return self._get_model().encode(texts, convert_to_numpy=True, show_progress_bar=False)
 
     # ------------------------------------------------------------------
     # Write operations
     # ------------------------------------------------------------------
 
-    def add_chunk(self, chunk: str) -> None:
-        """Add a single chunk (skipped if duplicate)."""
-        chunk_id = self._generate_id(chunk)
-        embedding = self._embed(chunk)
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO chunks (chunk_id, collection, content, embedding)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (chunk_id, collection) DO NOTHING
-                    """,
-                    (chunk_id, self.collection_name, chunk, embedding),
-                )
-
     def add_chunks(
         self,
-        chunks: List[str],
+        chunks: Union[List[str], List[IngestChunk]],
         show_progress: bool = True,
         batch_size: int = 256,
     ) -> int:
         """
-        Batch-embed and insert chunks; duplicates are silently skipped.
+        Batch-embed and insert chunks with their provenance; duplicates are skipped.
 
-        Returns the number of rows actually inserted (excludes ON CONFLICT skips).
+        Accepts either plain strings (wrapped as inline chunks for backward
+        compatibility) or IngestChunk objects. Returns rows actually inserted
+        (excludes ON CONFLICT skips).
         """
-        # Deduplicate within the incoming list (same text → same SHA256 id)
-        chunk_id_map: dict = {}
-        for chunk in chunks:
-            cid = self._generate_id(chunk)
-            if cid not in chunk_id_map:
-                chunk_id_map[cid] = chunk
+        # Normalize to IngestChunk
+        norm: List[IngestChunk] = [
+            c if isinstance(c, IngestChunk) else IngestChunk(text=c) for c in chunks
+        ]
 
-        dropped = len(chunks) - len(chunk_id_map)
+        # Deduplicate within the incoming batch by (source, text) hash.
+        by_id: dict = {}
+        for c in norm:
+            cid = self._generate_id(c.text, c.source)
+            by_id.setdefault(cid, c)
+
+        dropped = len(norm) - len(by_id)
         if dropped:
             logger.info(f"Deduplicated {dropped} duplicate chunks from input")
 
-        items = list(chunk_id_map.items())  # [(id, text), ...]
+        items = list(by_id.items())  # [(id, IngestChunk), ...]
         if not items:
-            logger.info("All chunks already exist in the database")
+            logger.info("No chunks to insert")
             return 0
 
         logger.info(f"Inserting up to {len(items)} chunks into pgvector…")
@@ -232,21 +257,25 @@ class VectorDB:
 
         for i in range(0, total, batch_size):
             batch = items[i : i + batch_size]
-            batch_ids = [cid for cid, _ in batch]
-            batch_texts = [text for _, text in batch]
-            embeddings = self._embed_batch(batch_texts)
+            embeddings = self._embed_batch([c.text for _, c in batch])
 
             rows = [
-                (cid, self.collection_name, text, emb)
-                for cid, text, emb in zip(batch_ids, batch_texts, embeddings)
+                (
+                    cid, self.collection_name, c.text, emb,
+                    c.source, c.title, c.uri, c.page, c.chunk_index,
+                    json.dumps(c.metadata or {}),
+                )
+                for (cid, c), emb in zip(batch, embeddings)
             ]
 
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.executemany(
                         """
-                        INSERT INTO chunks (chunk_id, collection, content, embedding)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO chunks
+                            (chunk_id, collection, content, embedding,
+                             source, title, uri, page, chunk_index, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (chunk_id, collection) DO NOTHING
                         """,
                         rows,
@@ -273,19 +302,19 @@ class VectorDB:
                 )
                 return [(row[0], list(row[1])) for row in cur.fetchall()]
 
-    def search(self, query: str, n_results: int = 10) -> List[Tuple[str, float]]:
+    def search(self, query: str, n_results: int = 10) -> List[RetrievedChunk]:
         """
         Semantic search using pgvector HNSW (cosine).
 
-        Returns list of (chunk, similarity) sorted by descending similarity.
+        Returns RetrievedChunks (with provenance) sorted by descending similarity.
         Similarity = 1 - cosine_distance, so 1.0 is identical.
         """
         q_emb = self._embed(query)
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
-                    """
-                    SELECT content,
+                    f"""
+                    SELECT {_RETRIEVE_COLS},
                            1 - (embedding <=> %s) AS similarity
                     FROM chunks
                     WHERE collection = %s
@@ -294,9 +323,9 @@ class VectorDB:
                     """,
                     (q_emb, self.collection_name, q_emb, n_results),
                 )
-                return [(row[0], float(row[1])) for row in cur.fetchall()]
+                return [_row_to_retrieved(row[:-1], float(row[-1])) for row in cur.fetchall()]
 
-    def search_fts(self, query: str, n_results: int = 50) -> List[Tuple[str, float]]:
+    def search_fts(self, query: str, n_results: int = 50) -> List[RetrievedChunk]:
         """
         Full-text search using PostgreSQL tsvector + ts_rank.
 
@@ -309,8 +338,8 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
-                    """
-                    SELECT content,
+                    f"""
+                    SELECT {_RETRIEVE_COLS},
                            ts_rank(content_tsv, plainto_tsquery('english', %s)) AS score
                     FROM chunks
                     WHERE collection = %s
@@ -320,12 +349,13 @@ class VectorDB:
                     """,
                     (query, self.collection_name, query, n_results),
                 )
-                results = [(row[0], float(row[1])) for row in cur.fetchall()]
+                results = [_row_to_retrieved(row[:-1], float(row[-1])) for row in cur.fetchall()]
 
         if results:
-            max_score = max(s for _, s in results)
+            max_score = max(r.score for r in results)
             if max_score > 0:
-                results = [(chunk, s / max_score) for chunk, s in results]
+                for r in results:
+                    r.score = r.score / max_score
 
         return results
 
@@ -352,6 +382,34 @@ class VectorDB:
                     (self.collection_name,),
                 )
         logger.info(f"Cleared collection '{self.collection_name}'")
+
+    def delete_by_source(self, source: str) -> int:
+        """Delete all chunks for one source document. Returns rows deleted."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM chunks WHERE collection = %s AND source = %s",
+                    (self.collection_name, source),
+                )
+                deleted = cur.rowcount
+        logger.info(f"Deleted {deleted} chunks for source '{source}'")
+        return deleted
+
+    def list_sources(self) -> List[Tuple[str, int]]:
+        """Return (source, chunk_count) for each distinct source in this collection."""
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    """
+                    SELECT source, COUNT(*) AS n
+                    FROM chunks
+                    WHERE collection = %s AND source IS NOT NULL
+                    GROUP BY source
+                    ORDER BY source
+                    """,
+                    (self.collection_name,),
+                )
+                return [(row[0], int(row[1])) for row in cur.fetchall()]
 
     def delete_collection(self) -> None:
         """Alias for clear() — removes all rows for this collection."""

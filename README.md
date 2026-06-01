@@ -240,22 +240,43 @@ Endpoints (interactive docs at `/docs`):
 | `POST` | `/search` | Retrieve chunks (no generation) |
 | `POST` | `/query` | Retrieve + generate an answer (JSON) |
 | `POST` | `/query/stream` | Retrieve + stream the answer as Server-Sent Events |
-| `POST` | `/ingest` | Index raw text chunks into the served collection |
+| `POST` | `/ingest` | Index pre-chunked text (strings or `{text, source, title, uri, metadata}`) |
+| `POST` | `/ingest/file` | Upload + parse + chunk a document (PDF/DOCX/MD/TXT) |
+| `GET` | `/documents` | List indexed sources and chunk counts |
+| `DELETE` | `/documents?source=<name>` | Delete all chunks for one source |
 | `DELETE` | `/collections/{name}` | Clear the served collection |
 
 ```bash
+# Upload a real document — it's parsed, token-chunked, and indexed with provenance
+curl -F file=@handbook.pdf localhost:8000/ingest/file
+
+# Or index raw text directly
 curl -X POST localhost:8000/ingest \
   -H 'Content-Type: application/json' \
   -d '{"documents": ["Cats sleep 12-16 hours a day.", "A group of cats is a clowder."]}'
 
+# Answers come back with source provenance (source/title/page) in `sources`
 curl -X POST localhost:8000/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "How long do cats sleep?", "use_hybrid_search": true}'
+
+curl "localhost:8000/documents"                       # list sources
+curl -X DELETE "localhost:8000/documents?source=handbook.pdf"
 ```
+
+Documents are parsed locally (PDF via `pypdf`, DOCX via `python-docx`) and split with
+token-aware chunking (`CHUNK_MAX_TOKENS`/`CHUNK_OVERLAP`); each chunk keeps its
+`source`, `title`, and (for PDFs) `page` for citation. Chunks are deduplicated by
+`source` + content, so re-uploading the same file is idempotent.
+
+> **Upgrading an existing index:** the chunk-id scheme now includes the source, and
+> older rows have no provenance. For clean citations, clear and re-ingest:
+> `curl -X DELETE localhost:8000/collections/rag_lite` then re-upload your documents.
 
 Set `API_KEY` to require an `X-API-Key` header on every request. Service-layer
 settings (`API_HOST`, `API_PORT`, `API_KEY`, `CORS_ORIGINS`, `POOL_MIN_SIZE`,
-`POOL_MAX_SIZE`, `OLLAMA_TIMEOUT`) are read from the environment / `.env`. Every
+`POOL_MAX_SIZE`, `OLLAMA_TIMEOUT`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP`) are read from
+the environment / `.env`. Every
 response carries an `X-Request-ID` (generated if not supplied) that appears in the
 structured access logs, so a single request can be traced end-to-end.
 

@@ -35,6 +35,9 @@ service_requirements = [
     "uvicorn[standard]>=0.27.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
+    "python-multipart>=0.0.9",
+    "pypdf>=4.0.0",
+    "python-docx>=1.1.0",
 ]
 
 # Optional evaluation requirements
