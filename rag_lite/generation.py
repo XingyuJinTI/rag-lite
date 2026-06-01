@@ -6,11 +6,22 @@ with retrieved context in a RAG (Retrieval-Augmented Generation) pipeline.
 """
 
 import logging
+from functools import lru_cache
 from typing import List, Iterator
 
 import ollama
 
 logger = logging.getLogger(__name__)
+
+# Default seconds to wait on the LLM. Without a bound, a hung Ollama would pin a
+# server worker thread indefinitely and eventually exhaust the threadpool.
+DEFAULT_REQUEST_TIMEOUT = 60.0
+
+
+@lru_cache(maxsize=8)
+def _get_client(timeout: float) -> "ollama.Client":
+    """Cached Ollama client with a fixed timeout (host comes from OLLAMA_HOST)."""
+    return ollama.Client(timeout=timeout)
 
 
 def format_context(chunks: List[str]) -> str:
@@ -63,25 +74,27 @@ def generate_response(
     context_chunks: List[str],
     language_model: str,
     stream: bool = True,
-    system_message: str = "You are a helpful assistant that provides accurate answers based on given context."
+    system_message: str = "You are a helpful assistant that provides accurate answers based on given context.",
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> Iterator[str]:
     """
     Generate a response using the language model with retrieved context.
-    
+
     Args:
         query: User query
         context_chunks: List of retrieved context chunks
         language_model: Name of the language model to use
         stream: Whether to stream the response
         system_message: System message for the LLM
-        
+        timeout: Seconds to wait on the LLM before raising
+
     Yields:
         Response text chunks (if streaming) or complete response
     """
     prompt = create_prompt(query, context_chunks)
-    
+
     try:
-        response = ollama.chat(
+        response = _get_client(timeout).chat(
             model=language_model,
             messages=[
                 {'role': 'system', 'content': system_message},
@@ -107,7 +120,8 @@ def generate_response_string(
     query: str,
     context_chunks: List[str],
     language_model: str,
-    system_message: str = "You are a helpful assistant that provides accurate answers based on given context."
+    system_message: str = "You are a helpful assistant that provides accurate answers based on given context.",
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> str:
     """
     Generate a complete response as a string (non-streaming).
@@ -122,10 +136,11 @@ def generate_response_string(
         Complete response string
     """
     response_gen = generate_response(
-        query, 
-        context_chunks, 
-        language_model, 
+        query,
+        context_chunks,
+        language_model,
         stream=False,
-        system_message=system_message
+        system_message=system_message,
+        timeout=timeout,
     )
     return next(response_gen)

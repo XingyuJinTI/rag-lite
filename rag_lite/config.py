@@ -59,6 +59,7 @@ class ModelConfig:
     embedding_model: str = "BAAI/bge-base-en-v1.5"  # HuggingFace model for sentence-transformers
     language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
     reranker_model: str = RERANKER_BGE_BASE  # Cross-encoder model for reranking
+    request_timeout: float = 60.0  # Seconds to wait on the Ollama LLM before giving up
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -67,6 +68,7 @@ class ModelConfig:
             embedding_model=_get_env_str("EMBEDDING_MODEL", cls.embedding_model),
             language_model=_get_env_str("LANGUAGE_MODEL", cls.language_model),
             reranker_model=_get_env_str("RERANKER_MODEL", cls.reranker_model),
+            request_timeout=_get_env_float("OLLAMA_TIMEOUT", cls.request_timeout),
         )
 
 

@@ -127,7 +127,8 @@ class RAGPipeline:
             query,
             context_chunks,
             self.config.model.language_model,
-            stream=stream
+            stream=stream,
+            timeout=self.config.model.request_timeout,
         )
 
     def query(self, query: str, stream: bool = True) -> Tuple[List[Tuple[str, float]], Iterator[str]]:

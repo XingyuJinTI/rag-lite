@@ -37,6 +37,7 @@ services:
       RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-base}
       LANGUAGE_MODEL: ${LANGUAGE_MODEL:-hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-60}
       POOL_MIN_SIZE: ${POOL_MIN_SIZE:-2}
       POOL_MAX_SIZE: ${POOL_MAX_SIZE:-10}
       API_KEY: ${API_KEY:-}
@@ -50,6 +51,14 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Liveness probe hits /healthz, which intentionally does NOT check the DB, so a
+    # database blip won't mark the API unhealthy and trigger a restart.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     # No model volume: the embedding + reranker models are baked into the image
     # (see Dockerfile), so the container is self-contained and air-gapped. Mounting
     # a volume over /models would shadow the baked models and go stale across rebuilds.
