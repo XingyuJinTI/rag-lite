@@ -5,12 +5,14 @@ This module provides a high-level interface for the complete RAG workflow.
 """
 
 import logging
-from typing import List, Tuple, Iterator, Optional
+from typing import List, Tuple, Iterator, Optional, Union
 
 from .config import Config
 from .vector_db import VectorDB
 from .retrieval import retrieve, expand_query
 from .generation import generate_response
+from .types import IngestChunk, RetrievedChunk
+from . import loaders, chunking
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +45,56 @@ class RAGPipeline:
             pool_max_size=config.storage.pool_max_size,
         )
 
-    def index_documents(self, documents: List[str], show_progress: bool = True) -> None:
+    def index_documents(
+        self,
+        documents: Union[List[str], List[IngestChunk]],
+        show_progress: bool = True,
+    ) -> int:
         """
-        Index documents by creating embeddings and storing them.
-        
+        Index documents/chunks by creating embeddings and storing them.
+
         Args:
-            documents: List of document chunks to index
+            documents: list of raw strings or IngestChunk objects
             show_progress: Whether to log progress
+        Returns:
+            Number of chunks actually inserted
         """
         logger.info(f"Indexing {len(documents)} documents...")
-        self.vector_db.add_chunks(documents, show_progress=show_progress)
-        logger.info(f"Indexed {self.vector_db.size()} documents")
+        inserted = self.vector_db.add_chunks(documents, show_progress=show_progress)
+        logger.info(f"Indexed {inserted} new chunks (collection size: {self.vector_db.size()})")
+        return inserted
+
+    def ingest_file(
+        self,
+        path: str,
+        *,
+        source: Optional[str] = None,
+        uri: Optional[str] = None,
+    ) -> int:
+        """
+        Parse a document (PDF/DOCX/MD/TXT), chunk it, and index it with provenance.
+
+        Args:
+            path: filesystem path to the document
+            source: override the source label (defaults to the filename)
+            uri: override the stored URI (defaults to the absolute path)
+        Returns:
+            Number of chunks inserted
+        """
+        segments, meta = loaders.load_document(path, uri=uri)
+        chunks = chunking.chunk_segments(
+            segments,
+            source=source or meta["source"],
+            title=meta["title"],
+            uri=meta["uri"],
+            embedding_model=self.config.model.embedding_model,
+            max_tokens=self.config.chunking.max_tokens,
+            overlap=self.config.chunking.overlap,
+        )
+        if not chunks:
+            logger.warning(f"No text extracted from '{path}'")
+            return 0
+        return self.index_documents(chunks, show_progress=True)
 
     def retrieve(
         self,
@@ -66,7 +107,7 @@ class RAGPipeline:
         rrf_k: Optional[int] = None,
         rrf_weight: Optional[float] = None,
         reranker_model: Optional[str] = None,
-    ) -> List[Tuple[str, float]]:
+    ) -> List[RetrievedChunk]:
         """
         Retrieve relevant chunks for a query.
 
@@ -108,21 +149,21 @@ class RAGPipeline:
     def generate(
         self,
         query: str,
-        retrieved_chunks: List[Tuple[str, float]],
+        retrieved_chunks: List[RetrievedChunk],
         stream: bool = True
     ) -> Iterator[str]:
         """
         Generate a response using retrieved context.
-        
+
         Args:
             query: User query
-            retrieved_chunks: List of (chunk, score) tuples from retrieval
+            retrieved_chunks: List of RetrievedChunk from retrieval
             stream: Whether to stream the response
-            
+
         Yields:
             Response text chunks (if streaming)
         """
-        context_chunks = [chunk for chunk, _ in retrieved_chunks]
+        context_chunks = [c.content for c in retrieved_chunks]
         return generate_response(
             query,
             context_chunks,
@@ -131,7 +172,7 @@ class RAGPipeline:
             timeout=self.config.model.request_timeout,
         )
 
-    def query(self, query: str, stream: bool = True) -> Tuple[List[Tuple[str, float]], Iterator[str]]:
+    def query(self, query: str, stream: bool = True) -> Tuple[List[RetrievedChunk], Iterator[str]]:
         """
         Complete RAG pipeline: retrieve and generate.
         

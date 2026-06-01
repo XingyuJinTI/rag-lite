@@ -184,11 +184,14 @@ Examples:
             retrieved, response_stream = pipeline.query(query, stream=True)
             
             print('\nRetrieved:')
-            for chunk, score in retrieved:
-                display_text = chunk.strip()[:200]
-                if len(chunk.strip()) > 200:
+            for rc in retrieved:
+                display_text = rc.content.strip()[:200]
+                if len(rc.content.strip()) > 200:
                     display_text += "..."
-                print(f' - (score: {score:.3f}) {display_text}')
+                provenance = ""
+                if rc.source:
+                    provenance = f" [{rc.source}" + (f" p.{rc.page}" if rc.page else "") + "]"
+                print(f' - (score: {rc.score:.3f}){provenance} {display_text}')
             
             print('\nResponse:')
             for chunk in response_stream:

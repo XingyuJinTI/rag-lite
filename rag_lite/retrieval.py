@@ -15,6 +15,7 @@ from typing import List, Tuple, Optional, Dict
 import numpy as np
 import ollama
 
+from .types import RetrievedChunk
 from .utils import get_device
 
 _cross_encoder_model = None
@@ -24,25 +25,28 @@ logger = logging.getLogger(__name__)
 
 
 def reciprocal_rank_fusion(
-    ranked_lists: List[List[Tuple[str, float]]],
+    ranked_lists: List[List[RetrievedChunk]],
     k: int = 60,
     rrf_weight: float = 0.7
-) -> List[Tuple[str, float]]:
+) -> List[RetrievedChunk]:
     """
     Combine ranked lists using Weighted Reciprocal Rank Fusion.
 
     Score = weight * 1/(k + rank). Using ranks rather than raw scores makes
-    fusion robust to incompatible score scales across retrieval methods.
+    fusion robust to incompatible score scales across retrieval methods. Chunks
+    are deduplicated by chunk_id (identity), so the same chunk surfacing in two
+    lists accumulates both contributions.
 
     Args:
-        ranked_lists: List of (chunk, score) lists, one per retrieval method
+        ranked_lists: List of RetrievedChunk lists, one per retrieval method
         k: Smoothing constant (higher = more uniform distribution)
         rrf_weight: Weight for the first list; second gets 1 - rrf_weight.
                     For >2 lists, weight is distributed equally.
     Returns:
-        List of (chunk, rrf_score) tuples, sorted descending
+        List of RetrievedChunk (with fused rrf score), sorted descending
     """
     rrf_scores: Dict[str, float] = {}
+    chunks_by_id: Dict[str, RetrievedChunk] = {}
 
     weights = (
         [rrf_weight, 1 - rrf_weight]
@@ -52,14 +56,18 @@ def reciprocal_rank_fusion(
 
     for list_idx, ranked_list in enumerate(ranked_lists):
         weight = weights[list_idx] if list_idx < len(weights) else weights[-1]
-        for rank, (chunk, _) in enumerate(ranked_list, start=1):
-            if chunk not in rrf_scores:
-                rrf_scores[chunk] = 0.0
-            rrf_scores[chunk] += weight * (1.0 / (k + rank))
+        for rank, chunk in enumerate(ranked_list, start=1):
+            key = chunk.chunk_id or chunk.content
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + weight * (1.0 / (k + rank))
+            chunks_by_id.setdefault(key, chunk)
 
-    results = [(chunk, score) for chunk, score in rrf_scores.items()]
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results
+    fused = []
+    for key, score in rrf_scores.items():
+        chunk = chunks_by_id[key]
+        chunk.score = score
+        fused.append(chunk)
+    fused.sort(key=lambda c: c.score, reverse=True)
+    return fused
 
 
 def expand_query(
@@ -123,19 +131,20 @@ def _get_cross_encoder(model_name: str):
 
 def rerank_with_cross_encoder(
     query: str,
-    candidates: List[Tuple[str, float]],
+    candidates: List[RetrievedChunk],
     reranker_model: str,
-) -> List[Tuple[str, float]]:
+) -> List[RetrievedChunk]:
     """
     Rerank candidates using a cross-encoder model.
 
     Unlike bi-encoder cosine similarity, the cross-encoder jointly encodes
     (query, chunk) pairs — much more accurate for relevance judgement at the
-    cost of ~O(n) inference calls.
+    cost of ~O(n) inference calls. Provenance is preserved; only the score and
+    ordering change.
 
     Args:
         query: User query
-        candidates: First-stage retrieval results (chunk, score)
+        candidates: First-stage RetrievedChunks
         reranker_model: HuggingFace cross-encoder model name
     Returns:
         Candidates re-sorted by cross-encoder score, normalized to [0, 1]
@@ -144,8 +153,7 @@ def rerank_with_cross_encoder(
         return []
 
     cross_encoder = _get_cross_encoder(reranker_model)
-    candidate_texts = [chunk.strip() for chunk, _ in candidates]
-    pairs = [(query, text) for text in candidate_texts]
+    pairs = [(query, c.content.strip()) for c in candidates]
 
     logger.debug(f"Reranking {len(candidates)} candidates...")
     scores = cross_encoder.predict(pairs, show_progress_bar=False)
@@ -156,8 +164,9 @@ def rerank_with_cross_encoder(
     else:
         normalized_scores = [0.5] * len(scores)
 
-    reranked = [(chunk, normalized_scores[i]) for i, (chunk, _) in enumerate(candidates)]
-    reranked.sort(key=lambda x: x[1], reverse=True)
+    for c, s in zip(candidates, normalized_scores):
+        c.score = float(s)
+    reranked = sorted(candidates, key=lambda c: c.score, reverse=True)
     return reranked
 
 
@@ -173,7 +182,7 @@ def retrieve(
     rrf_k: int = 60,
     rrf_weight: float = 0.7,
     reranker_model: Optional[str] = None,
-) -> List[Tuple[str, float]]:
+) -> List[RetrievedChunk]:
     """
     Retrieve relevant chunks for a query.
 
@@ -200,7 +209,7 @@ def retrieve(
         rrf_weight: Semantic weight in RRF (0.7); tsvector gets 1 - rrf_weight
         reranker_model: Cross-encoder model name
     Returns:
-        List of (chunk, score) tuples
+        List of RetrievedChunk
     """
     if use_hybrid_search:
         semantic_results = vector_db.search(query, n_results=retrieve_k)

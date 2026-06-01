@@ -126,6 +126,21 @@ class RetrievalConfig:
 
 
 @dataclass
+class ChunkingConfig:
+    """Configuration for token-aware document chunking."""
+    max_tokens: int = 256   # Target tokens per chunk (capped at the model's max, 512)
+    overlap: int = 48       # Tokens of trailing context carried between chunks
+
+    @classmethod
+    def from_env(cls) -> "ChunkingConfig":
+        """Create ChunkingConfig from environment variables."""
+        return cls(
+            max_tokens=_get_env_int("CHUNK_MAX_TOKENS", cls.max_tokens),
+            overlap=_get_env_int("CHUNK_OVERLAP", cls.overlap),
+        )
+
+
+@dataclass
 class Config:
     """
     Main configuration class for RAG-Lite.
@@ -138,6 +153,7 @@ class Config:
     model: ModelConfig
     retrieval: RetrievalConfig
     storage: StorageConfig
+    chunking: ChunkingConfig
     data_file: str = "cat-facts.txt"
 
     @classmethod
@@ -147,6 +163,7 @@ class Config:
             model=ModelConfig.from_env(),
             retrieval=RetrievalConfig.from_env(),
             storage=StorageConfig.from_env(),
+            chunking=ChunkingConfig.from_env(),
             data_file=_get_env_str("DATA_FILE", cls.data_file),
         )
 
@@ -157,6 +174,7 @@ class Config:
             model=ModelConfig(),
             retrieval=RetrievalConfig(),
             storage=StorageConfig(),
+            chunking=ChunkingConfig(),
         )
     
     @classmethod

@@ -1,6 +1,6 @@
 """Request/response models for the RAG-Lite HTTP API."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,11 @@ class SearchRequest(BaseModel):
 class Chunk(BaseModel):
     content: str
     score: float
+    source: Optional[str] = None
+    title: Optional[str] = None
+    uri: Optional[str] = None
+    page: Optional[int] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
@@ -36,8 +41,20 @@ class QueryResponse(BaseModel):
     sources: List[Chunk]
 
 
+class IngestDocument(BaseModel):
+    """A single text chunk to index, with optional provenance."""
+    text: str = Field(..., min_length=1)
+    source: Optional[str] = None
+    title: Optional[str] = None
+    uri: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class IngestRequest(BaseModel):
-    documents: List[str] = Field(..., min_length=1, description="Raw text chunks to index.")
+    # Accept either bare strings (convenience) or structured documents with metadata.
+    documents: List[Union[str, IngestDocument]] = Field(
+        ..., min_length=1, description="Text chunks to index (strings or objects)."
+    )
 
 
 class IngestResponse(BaseModel):
@@ -47,9 +64,27 @@ class IngestResponse(BaseModel):
     total_in_collection: int
 
 
+class FileIngestResponse(BaseModel):
+    source: str
+    inserted: int
+    collection: str
+    total_in_collection: int
+
+
+class SourceInfo(BaseModel):
+    source: str
+    chunks: int
+
+
+class SourceListResponse(BaseModel):
+    collection: str
+    sources: List[SourceInfo]
+
+
 class DeleteResponse(BaseModel):
     collection: str
     deleted: bool
+    deleted_chunks: Optional[int] = None
 
 
 class LivenessResponse(BaseModel):
