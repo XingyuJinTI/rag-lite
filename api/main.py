@@ -10,12 +10,16 @@ Scope (Phase 1): the service operates on a single collection (`PG_COLLECTION`).
 Multi-collection / per-tenant access control is a later phase.
 """
 
+import contextvars
 import json
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -29,6 +33,7 @@ from .schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    LivenessResponse,
     QueryRequest,
     QueryResponse,
     SearchRequest,
@@ -39,14 +44,38 @@ logger = logging.getLogger(__name__)
 
 settings = ServiceSettings()
 
+# Carries the current request's ID so every log line emitted while handling it can
+# be correlated — the basis of tracing one request across modules.
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class RequestIdFilter(logging.Filter):
+    """Inject the current request_id into every log record on the root handler."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get()
+        return True
+
+
+def _generation_http_error(exc: Exception) -> HTTPException:
+    """Map an LLM-call failure to an appropriate gateway status code."""
+    if isinstance(exc, httpx.TimeoutException):
+        return HTTPException(status_code=504, detail=f"LLM timed out: {exc}")
+    if isinstance(exc, (httpx.ConnectError, httpx.TransportError)):
+        return HTTPException(status_code=502, detail=f"LLM unreachable: {exc}")
+    return HTTPException(status_code=502, detail=f"LLM error: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Build the shared pipeline on startup, release the pool on shutdown."""
     logging.basicConfig(
         level=settings.log_level.upper(),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s %(levelname)s [%(request_id)s] %(name)s - %(message)s",
     )
+    # Attach the request-id filter to the root handler so it populates every record.
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(RequestIdFilter())
     config = Config.from_env()
     logger.info("Initializing RAG pipeline (collection=%s)…", config.storage.collection_name)
     app.state.pipeline = RAGPipeline(config)
@@ -74,6 +103,27 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Assign/propagate a request ID, time the request, and emit an access log line."""
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    token = request_id_ctx.set(rid)
+    start = time.perf_counter()
+    status = 500  # assume failure until proven otherwise (covers unhandled exceptions)
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "access method=%s path=%s status=%s duration_ms=%.1f",
+            request.method, request.url.path, status, duration_ms,
+        )
+        request_id_ctx.reset(token)
+
+
 def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
     """Enforce the API key when one is configured. No-op in open (dev) mode."""
     if settings.api_key and x_api_key != settings.api_key:
@@ -88,21 +138,34 @@ def get_pipeline() -> RAGPipeline:
 # Health
 # ----------------------------------------------------------------------
 
-@app.get("/healthz", response_model=HealthResponse, tags=["ops"])
-def healthz() -> HealthResponse:
-    """Liveness + readiness: confirms the DB pool answers and reports doc count."""
+@app.get("/healthz", response_model=LivenessResponse, tags=["ops"])
+def healthz() -> LivenessResponse:
+    """
+    Liveness: is the process up and serving? Deliberately does NOT touch the DB —
+    a transient database blip should not cause an orchestrator to kill and restart
+    an otherwise-healthy API (which would turn a brief hiccup into a crash loop).
+    """
+    return LivenessResponse(status="ok")
+
+
+@app.get("/readyz", response_model=HealthResponse, tags=["ops"])
+def readyz() -> HealthResponse:
+    """
+    Readiness: can this instance serve traffic right now? Pings the DB pool and
+    reports the doc count. Returns 503 if the database is unreachable so the load
+    balancer stops routing here until it recovers.
+    """
     pipeline: RAGPipeline = app.state.pipeline
     try:
         pipeline.vector_db.ping()
-        db_status = "ok"
         count = pipeline.vector_db.size()
     except Exception as exc:  # pragma: no cover - surfaced to the caller
-        logger.error("Health check failed: %s", exc)
+        logger.error("Readiness check failed: %s", exc)
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
 
     return HealthResponse(
         status="ok",
-        database=db_status,
+        database="ok",
         collection=pipeline.vector_db.collection_name,
         documents=count,
     )
@@ -146,7 +209,11 @@ def query(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> Q
         use_hybrid_search=req.use_hybrid_search,
         use_reranking=req.use_reranking,
     )
-    answer = "".join(pipeline.generate(req.query, retrieved, stream=False))
+    try:
+        answer = "".join(pipeline.generate(req.query, retrieved, stream=False))
+    except Exception as exc:
+        logger.error("Generation failed: %s", exc)
+        raise _generation_http_error(exc)
     return QueryResponse(
         query=req.query,
         answer=answer,
@@ -182,8 +249,11 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
             for token in pipeline.generate(req.query, retrieved, stream=True):
                 yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
         except Exception as exc:  # surface generation errors to the client stream
-            logger.error("Generation failed mid-stream: %s", exc)
-            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+            # Headers are already sent, so we can't change the status code — report
+            # the failure as a terminal stream event instead.
+            detail = _generation_http_error(exc).detail
+            logger.error("Generation failed mid-stream: %s", detail)
+            yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
             return
         yield "event: done\ndata: {}\n\n"
 

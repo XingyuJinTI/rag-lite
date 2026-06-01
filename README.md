@@ -59,8 +59,8 @@ docker compose up --build
 **3. Confirm it's healthy:**
 
 ```bash
-curl localhost:8000/healthz
-# {"status":"ok","database":"ok","collection":"rag_lite","documents":0}
+curl localhost:8000/healthz   # liveness: {"status":"ok"}
+curl localhost:8000/readyz    # readiness: {"status":"ok","database":"ok","collection":"rag_lite","documents":0}
 ```
 
 **4. Ingest documents** (raw text chunks; duplicates are skipped):
@@ -235,7 +235,8 @@ Endpoints (interactive docs at `/docs`):
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET`  | `/healthz` | Liveness/readiness; pings the pool, reports doc count |
+| `GET`  | `/healthz` | Liveness — process is up (no DB check; safe for restart probes) |
+| `GET`  | `/readyz` | Readiness — pings the pool, reports doc count (503 if DB down) |
 | `POST` | `/search` | Retrieve chunks (no generation) |
 | `POST` | `/query` | Retrieve + generate an answer (JSON) |
 | `POST` | `/query/stream` | Retrieve + stream the answer as Server-Sent Events |
@@ -254,7 +255,9 @@ curl -X POST localhost:8000/query \
 
 Set `API_KEY` to require an `X-API-Key` header on every request. Service-layer
 settings (`API_HOST`, `API_PORT`, `API_KEY`, `CORS_ORIGINS`, `POOL_MIN_SIZE`,
-`POOL_MAX_SIZE`) are read from the environment / `.env`.
+`POOL_MAX_SIZE`, `OLLAMA_TIMEOUT`) are read from the environment / `.env`. Every
+response carries an `X-Request-ID` (generated if not supplied) that appears in the
+structured access logs, so a single request can be traced end-to-end.
 
 > **Scope:** Phase 1 serves a single collection (`PG_COLLECTION`). Multi-collection
 > tenancy, per-document access control, and richer ingestion (PDF/DOCX, citations)
