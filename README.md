@@ -31,6 +31,63 @@ RAG-Lite provides a modular RAG pipeline with hybrid search capabilities, runnin
 - **Embeddings**: sentence-transformers (local, HuggingFace models)
 - **LLM Generation**: Ollama (local LLM inference)
 
+## Quickstart — run inference yourself
+
+The fastest path to a working `/query` is Docker Compose, which provisions Postgres +
+pgvector and the API for you. The only external dependency is Ollama (the LLM), which
+runs on your host.
+
+**Prerequisites**
+
+- [Docker](https://docs.docker.com/get-docker/) (with Compose v2)
+- [Ollama](https://ollama.ai/) installed on the host
+
+**1. Start Ollama and pull the generation model** (one-time download):
+
+```bash
+ollama serve                                                   # in its own terminal
+ollama pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF
+```
+
+**2. Build and start the stack** (first build downloads the embedding + reranker
+models and bakes them into the image; subsequent runs need no internet):
+
+```bash
+docker compose up --build
+```
+
+**3. Confirm it's healthy:**
+
+```bash
+curl localhost:8000/healthz
+# {"status":"ok","database":"ok","collection":"rag_lite","documents":0}
+```
+
+**4. Ingest documents** (raw text chunks; duplicates are skipped):
+
+```bash
+curl -X POST localhost:8000/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"documents": ["Cats sleep 12 to 16 hours per day.", "A group of cats is a clowder."]}'
+```
+
+**5. Ask a question** — retrieval + grounded generation:
+
+```bash
+curl -X POST localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How long do cats sleep?", "use_hybrid_search": true, "use_reranking": true}'
+```
+
+Interactive API docs (try every endpoint from the browser): http://localhost:8000/docs
+
+> **No Docker?** See [Installation](#installation) to run Postgres + pgvector and the
+> API directly with `pip install -e .[service]` and `uvicorn api.main:app`. For a
+> terminal-only experience with no HTTP layer, use the [CLI](#usage).
+>
+> **Air-gapped:** after the one-time build (and `ollama pull`), nothing needs the
+> internet — both ML models are baked into the image with `HF_HUB_OFFLINE=1`.
+
 ## Requirements
 
 - Python 3.8+
@@ -147,6 +204,61 @@ pipeline.index_documents(load_text_file("your-data.txt"))
 results, response = pipeline.query("Your question here", stream=False)
 print("".join(response))
 ```
+
+**HTTP API:**
+
+The service wraps the pipeline in a FastAPI app backed by a pgvector connection pool,
+so it is safe to share across concurrent requests. The pipeline (embedding model,
+reranker, pool) is built once at startup.
+
+Run with Docker (brings up Postgres + pgvector + the API; expects Ollama on the host):
+
+```bash
+docker compose up --build
+curl localhost:8000/healthz
+```
+
+The image bakes in both the embedding and reranker models and sets
+`HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, so once built the container runs
+**fully air-gapped** — only the one-time build (and the Ollama model pull on the host)
+needs internet.
+
+Or run locally against an existing Postgres:
+
+```bash
+pip install -e .[service]
+export PG_DSN="postgresql://localhost/rag_lite"
+uvicorn api.main:app --reload
+```
+
+Endpoints (interactive docs at `/docs`):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/healthz` | Liveness/readiness; pings the pool, reports doc count |
+| `POST` | `/search` | Retrieve chunks (no generation) |
+| `POST` | `/query` | Retrieve + generate an answer (JSON) |
+| `POST` | `/query/stream` | Retrieve + stream the answer as Server-Sent Events |
+| `POST` | `/ingest` | Index raw text chunks into the served collection |
+| `DELETE` | `/collections/{name}` | Clear the served collection |
+
+```bash
+curl -X POST localhost:8000/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"documents": ["Cats sleep 12-16 hours a day.", "A group of cats is a clowder."]}'
+
+curl -X POST localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How long do cats sleep?", "use_hybrid_search": true}'
+```
+
+Set `API_KEY` to require an `X-API-Key` header on every request. Service-layer
+settings (`API_HOST`, `API_PORT`, `API_KEY`, `CORS_ORIGINS`, `POOL_MIN_SIZE`,
+`POOL_MAX_SIZE`) are read from the environment / `.env`.
+
+> **Scope:** Phase 1 serves a single collection (`PG_COLLECTION`). Multi-collection
+> tenancy, per-document access control, and richer ingestion (PDF/DOCX, citations)
+> are planned in later phases — see [PRODUCTION.md](PRODUCTION.md).
 
 ## Retrieval
 

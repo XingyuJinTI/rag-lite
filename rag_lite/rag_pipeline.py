@@ -39,6 +39,8 @@ class RAGPipeline:
             collection_name=config.storage.collection_name,
             max_chunk_chars=config.storage.max_chunk_chars,
             embedding_dim=config.storage.embedding_dim,
+            pool_min_size=config.storage.pool_min_size,
+            pool_max_size=config.storage.pool_max_size,
         )
 
     def index_documents(self, documents: List[str], show_progress: bool = True) -> None:
@@ -142,3 +144,7 @@ class RAGPipeline:
         retrieved = self.retrieve(query)
         response = self.generate(query, retrieved, stream=stream)
         return retrieved, response
+
+    def close(self) -> None:
+        """Release the underlying connection pool."""
+        self.vector_db.close()

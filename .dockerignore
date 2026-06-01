@@ -1,0 +1,15 @@
+.git
+.gitignore
+.cursor
+chroma_db/
+*.jsonl
+cat-facts.txt
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+evaluation/
+configs/
+*.md
+.env

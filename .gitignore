@@ -1,1 +1,17 @@
+# Python
+__pycache__/
 */__pycache__/*
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Local env / secrets
+.env
+
+# Legacy local vector store (superseded by pgvector)
+chroma_db/
+
+# Large datasets / corpora (download or mount at runtime, don't commit)
+# cat-facts.txt stays tracked as small demo data.
+*.jsonl

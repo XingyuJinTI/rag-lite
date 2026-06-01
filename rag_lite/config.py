@@ -77,6 +77,8 @@ class StorageConfig:
     collection_name: str = "rag_lite"
     max_chunk_chars: int = 500  # Safety limit (~250-333 tokens for very dense text)
     embedding_dim: int = 768    # Must match the embedding model (bge-base-en-v1.5 → 768)
+    pool_min_size: int = 1      # Connection pool: idle connections kept open
+    pool_max_size: int = 10     # Connection pool: hard ceiling on concurrent connections
 
     @classmethod
     def from_env(cls) -> "StorageConfig":
@@ -86,6 +88,8 @@ class StorageConfig:
             collection_name=_get_env_str("PG_COLLECTION", cls.collection_name),
             max_chunk_chars=_get_env_int("MAX_CHUNK_CHARS", cls.max_chunk_chars),
             embedding_dim=_get_env_int("EMBEDDING_DIM", cls.embedding_dim),
+            pool_min_size=_get_env_int("POOL_MIN_SIZE", cls.pool_min_size),
+            pool_max_size=_get_env_int("POOL_MAX_SIZE", cls.pool_max_size),
         )
 
 

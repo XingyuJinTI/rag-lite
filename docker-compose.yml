@@ -1,0 +1,58 @@
+# Local / on-prem deployment: API + Postgres(pgvector).
+#
+# Ollama is expected to run on the host (or a separate service). The API reaches it
+# via OLLAMA_HOST. On Docker Desktop, host.docker.internal resolves to the host.
+#
+#   docker compose up --build
+#   curl localhost:8000/healthz
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag_lite
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_lite"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      args:
+        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}
+        RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-base}
+    environment:
+      PG_DSN: postgresql://rag:rag@db:5432/rag_lite
+      PG_COLLECTION: ${PG_COLLECTION:-rag_lite}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-base}
+      LANGUAGE_MODEL: ${LANGUAGE_MODEL:-hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      POOL_MIN_SIZE: ${POOL_MIN_SIZE:-2}
+      POOL_MAX_SIZE: ${POOL_MAX_SIZE:-10}
+      API_KEY: ${API_KEY:-}
+      # Models are baked into the image; keep loads local at runtime.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # No model volume: the embedding + reranker models are baked into the image
+    # (see Dockerfile), so the container is self-contained and air-gapped. Mounting
+    # a volume over /models would shadow the baked models and go stale across rebuilds.
+
+volumes:
+  pgdata:
