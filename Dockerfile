@@ -20,7 +20,7 @@ RUN pip install -r requirements.txt
 # Cache the embedding AND reranker models into the image's HF_HOME so the container
 # runs fully air-gapped at runtime (no HuggingFace access needed). Done BEFORE copying
 # source so editing code doesn't invalidate the (expensive) model layer.
-ARG EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+ARG EMBEDDING_MODEL=BAAI/bge-m3
 ARG RERANKER_MODEL=BAAI/bge-reranker-base
 RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \
 SentenceTransformer('${EMBEDDING_MODEL}'); \

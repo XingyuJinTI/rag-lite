@@ -43,6 +43,7 @@ class RAGPipeline:
             embedding_dim=config.storage.embedding_dim,
             pool_min_size=config.storage.pool_min_size,
             pool_max_size=config.storage.pool_max_size,
+            table_name=config.storage.table_name,
         )
 
     def index_documents(

@@ -56,7 +56,7 @@ class ModelConfig:
     # Cross-encoder reranker model
     RERANKER_BGE_BASE: str = "BAAI/bge-reranker-base"
     
-    embedding_model: str = "BAAI/bge-base-en-v1.5"  # HuggingFace model for sentence-transformers
+    embedding_model: str = "BAAI/bge-m3"  # HuggingFace model for sentence-transformers (dense, 1024-d, long-context)
     language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
     reranker_model: str = RERANKER_BGE_BASE  # Cross-encoder model for reranking
     request_timeout: float = 60.0  # Seconds to wait on the Ollama LLM before giving up
@@ -77,8 +77,9 @@ class StorageConfig:
     """Configuration for PostgreSQL + pgvector storage."""
     pg_dsn: str = "postgresql://localhost/rag_lite"
     collection_name: str = "rag_lite"
+    table_name: str = "chunks"  # Physical table; embedding dim is fixed per table
     max_chunk_chars: int = 500  # Safety limit (~250-333 tokens for very dense text)
-    embedding_dim: int = 768    # Must match the embedding model (bge-base-en-v1.5 → 768)
+    embedding_dim: int = 1024   # Must match the embedding model (bge-m3 → 1024)
     pool_min_size: int = 1      # Connection pool: idle connections kept open
     pool_max_size: int = 10     # Connection pool: hard ceiling on concurrent connections
 
@@ -88,6 +89,7 @@ class StorageConfig:
         return cls(
             pg_dsn=_get_env_str("PG_DSN", cls.pg_dsn),
             collection_name=_get_env_str("PG_COLLECTION", cls.collection_name),
+            table_name=_get_env_str("TABLE_NAME", cls.table_name),
             max_chunk_chars=_get_env_int("MAX_CHUNK_CHARS", cls.max_chunk_chars),
             embedding_dim=_get_env_int("EMBEDDING_DIM", cls.embedding_dim),
             pool_min_size=_get_env_int("POOL_MIN_SIZE", cls.pool_min_size),
