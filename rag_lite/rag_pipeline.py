@@ -163,10 +163,11 @@ class RAGPipeline:
         Yields:
             Response text chunks (if streaming)
         """
-        context_chunks = [c.content for c in retrieved_chunks]
+        # Pass full RetrievedChunks so the prompt can render citation labels
+        # ([n] (Title, p.X)); generation maps citation index n → this list's order.
         return generate_response(
             query,
-            context_chunks,
+            retrieved_chunks,
             self.config.model.language_model,
             stream=stream,
             timeout=self.config.model.request_timeout,

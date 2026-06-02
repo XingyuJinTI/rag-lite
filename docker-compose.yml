@@ -38,6 +38,7 @@ services:
       LANGUAGE_MODEL: ${LANGUAGE_MODEL:-hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-60}
+      ABSTAIN_THRESHOLD: ${ABSTAIN_THRESHOLD:-0}
       POOL_MIN_SIZE: ${POOL_MIN_SIZE:-2}
       POOL_MAX_SIZE: ${POOL_MAX_SIZE:-10}
       API_KEY: ${API_KEY:-}

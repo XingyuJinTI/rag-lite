@@ -111,6 +111,12 @@ class RetrievalConfig:
     rrf_k: int = 60               # RRF constant (standard value)
     rrf_weight: float = 0.7       # Semantic weight in RRF; tsvector gets 1 - rrf_weight (0.3)
 
+    # Abstention: if the top result's score is below this, answer "I don't know"
+    # without calling the LLM. Default 0.0 = disabled. Most meaningful with
+    # reranking enabled (cross-encoder scores are normalized to [0, 1]); raw RRF
+    # scores are ~0.01–0.02, so pick a threshold to match the active score scale.
+    abstain_threshold: float = 0.0
+
     @classmethod
     def from_env(cls) -> "RetrievalConfig":
         """Create RetrievalConfig from environment variables."""
@@ -122,6 +128,7 @@ class RetrievalConfig:
             use_reranking=_get_env_bool("USE_RERANKING", cls.use_reranking),
             rrf_k=_get_env_int("RRF_K", cls.rrf_k),
             rrf_weight=_get_env_float("RRF_WEIGHT", cls.rrf_weight),
+            abstain_threshold=_get_env_float("ABSTAIN_THRESHOLD", cls.abstain_threshold),
         )
 
 

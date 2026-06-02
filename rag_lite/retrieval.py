@@ -158,13 +158,13 @@ def rerank_with_cross_encoder(
     logger.debug(f"Reranking {len(candidates)} candidates...")
     scores = cross_encoder.predict(pairs, show_progress_bar=False)
 
-    min_score, max_score = float(np.min(scores)), float(np.max(scores))
-    if max_score > min_score:
-        normalized_scores = [(s - min_score) / (max_score - min_score) for s in scores]
-    else:
-        normalized_scores = [0.5] * len(scores)
+    # Sigmoid of the raw logit gives an *absolute* relevance probability in (0, 1):
+    # ~0.5 is the decision boundary, high logits → ~1. Unlike min-max normalization
+    # (which forces the top candidate to 1.0 regardless of how relevant it is), this
+    # is comparable across queries — so it can drive an abstention threshold.
+    probs = 1.0 / (1.0 + np.exp(-np.asarray(scores, dtype=float)))
 
-    for c, s in zip(candidates, normalized_scores):
+    for c, s in zip(candidates, probs):
         c.score = float(s)
     reranked = sorted(candidates, key=lambda c: c.score, reverse=True)
     return reranked

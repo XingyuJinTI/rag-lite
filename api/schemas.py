@@ -39,6 +39,10 @@ class QueryResponse(BaseModel):
     query: str
     answer: str
     sources: List[Chunk]
+    abstained: bool = False
+    # 1-based indices into `sources` that the answer actually cites (validated;
+    # out-of-range markers are stripped from `answer`).
+    citations: List[int] = Field(default_factory=list)
 
 
 class IngestDocument(BaseModel):

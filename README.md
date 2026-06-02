@@ -269,14 +269,26 @@ token-aware chunking (`CHUNK_MAX_TOKENS`/`CHUNK_OVERLAP`); each chunk keeps its
 `source`, `title`, and (for PDFs) `page` for citation. Chunks are deduplicated by
 `source` + content, so re-uploading the same file is idempotent.
 
+**Citations & abstention.** The answer cites supporting context inline with bracketed
+markers (`[1]`, `[2]`) whose numbers map to the order of the `sources` array (each with
+`title`/`page`). Markers are validated server-side: any pointing to a non-existent
+source are stripped from `answer`, and the response's `citations` field lists the
+1-based source indices actually cited. (Inline markers are model-generated and
+best-effort; the `sources` array itself is always reliable — it comes straight from
+retrieval.) If retrieval is too weak to ground an answer, the service abstains — it
+returns `"I don't have enough information…"` with `"abstained": true` and **does not
+call the LLM**. Abstention is controlled by `ABSTAIN_THRESHOLD` (default `0` = off);
+set it to a positive value, most meaningfully with reranking enabled (cross-encoder
+scores are sigmoid relevance probabilities in `(0,1)`; raw RRF scores are ~`0.01–0.02`).
+
 > **Upgrading an existing index:** the chunk-id scheme now includes the source, and
 > older rows have no provenance. For clean citations, clear and re-ingest:
 > `curl -X DELETE localhost:8000/collections/rag_lite` then re-upload your documents.
 
 Set `API_KEY` to require an `X-API-Key` header on every request. Service-layer
 settings (`API_HOST`, `API_PORT`, `API_KEY`, `CORS_ORIGINS`, `POOL_MIN_SIZE`,
-`POOL_MAX_SIZE`, `OLLAMA_TIMEOUT`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP`) are read from
-the environment / `.env`. Every
+`POOL_MAX_SIZE`, `OLLAMA_TIMEOUT`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP`,
+`ABSTAIN_THRESHOLD`) are read from the environment / `.env`. Every
 response carries an `X-Request-ID` (generated if not supplied) that appears in the
 structured access logs, so a single request can be traced end-to-end.
 
