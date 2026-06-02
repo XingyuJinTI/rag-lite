@@ -139,7 +139,7 @@ All settings are configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | HuggingFace embedding model |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | HuggingFace embedding model (dense, 1024-d, long-context) |
 | `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Ollama model for generation |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder model for reranking |
 
@@ -149,7 +149,7 @@ All settings are configured via environment variables:
 |----------|---------|-------------|
 | `PG_DSN` | `postgresql://localhost/rag_lite` | PostgreSQL connection string |
 | `PG_COLLECTION` | `rag_lite` | Collection name (stored as a column) |
-| `EMBEDDING_DIM` | `768` | Embedding dimension — must match the model |
+| `EMBEDDING_DIM` | `1024` | Embedding dimension — must match the model (bge-m3 → 1024, bge-base → 768) |
 | `DATA_FILE` | `cat-facts.txt` | Input data file path |
 
 **Retrieval:**

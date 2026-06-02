@@ -12,6 +12,7 @@ a connection for the duration of its transaction and returns it to the pool.
 import json
 import logging
 import hashlib
+import re
 from typing import List, Tuple, Optional, Union
 
 import numpy as np
@@ -70,6 +71,7 @@ class VectorDB:
         embedding_dim: int = 768,
         pool_min_size: int = 1,
         pool_max_size: int = 10,
+        table_name: str = "chunks",
     ):
         """
         Args:
@@ -83,12 +85,19 @@ class VectorDB:
                              Must match the model. Default 768 (bge-base-en-v1.5).
             pool_min_size:   Idle connections the pool keeps open.
             pool_max_size:   Hard ceiling on concurrent connections.
+            table_name:      Physical table name. The embedding column's dimension is
+                             fixed per table, so models of different dimensionality
+                             (e.g. bge-base=768 vs bge-large=1024) must use separate
+                             tables. Validated to a safe identifier.
         """
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+            raise ValueError(f"Invalid table_name: {table_name!r}")
         self.embedding_model = embedding_model
         self.pg_dsn = pg_dsn
         self.collection_name = collection_name
         self.max_chunk_chars = max_chunk_chars or self.MAX_CHUNK_CHARS
         self.embedding_dim = embedding_dim
+        self.table_name = table_name
 
         self._model: Optional[SentenceTransformer] = None
 
@@ -132,12 +141,13 @@ class VectorDB:
 
     def _init_schema(self) -> None:
         """Create extension, table, indexes, and metadata columns idempotently."""
+        t = self.table_name
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
                 cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS chunks (
+                    CREATE TABLE IF NOT EXISTS {t} (
                         chunk_id    TEXT                    NOT NULL,
                         collection  TEXT                    NOT NULL,
                         content     TEXT                    NOT NULL,
@@ -150,33 +160,33 @@ class VectorDB:
 
                 # Provenance columns — added via ALTER so existing tables migrate in
                 # place. All nullable/defaulted, so pre-Phase-2 rows remain valid.
-                cur.execute("""
-                    ALTER TABLE chunks
+                cur.execute(f"""
+                    ALTER TABLE {t}
                         ADD COLUMN IF NOT EXISTS source      TEXT,
                         ADD COLUMN IF NOT EXISTS title       TEXT,
                         ADD COLUMN IF NOT EXISTS uri         TEXT,
                         ADD COLUMN IF NOT EXISTS page        INT,
                         ADD COLUMN IF NOT EXISTS chunk_index INT,
-                        ADD COLUMN IF NOT EXISTS metadata    JSONB DEFAULT '{}'::jsonb,
+                        ADD COLUMN IF NOT EXISTS metadata    JSONB DEFAULT '{{}}'::jsonb,
                         ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT now()
                 """)
 
                 # HNSW index: fast approximate nearest-neighbour with cosine distance
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
-                    ON chunks USING hnsw (embedding vector_cosine_ops)
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {t}_embedding_hnsw_idx
+                    ON {t} USING hnsw (embedding vector_cosine_ops)
                 """)
 
                 # GIN index for full-text search
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS chunks_tsv_gin_idx
-                    ON chunks USING gin (content_tsv)
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {t}_tsv_gin_idx
+                    ON {t} USING gin (content_tsv)
                 """)
 
                 # Index supporting metadata filters and delete-by-source.
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS chunks_source_idx
-                    ON chunks (collection, source)
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {t}_source_idx
+                    ON {t} (collection, source)
                 """)
             # `with conn` commits on clean exit.
 
@@ -271,8 +281,8 @@ class VectorDB:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.executemany(
-                        """
-                        INSERT INTO chunks
+                        f"""
+                        INSERT INTO {self.table_name}
                             (chunk_id, collection, content, embedding,
                              source, title, uri, page, chunk_index, metadata)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -297,7 +307,7 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
-                    "SELECT content, embedding FROM chunks WHERE collection = %s",
+                    f"SELECT content, embedding FROM {self.table_name} WHERE collection = %s",
                     (self.collection_name,),
                 )
                 return [(row[0], list(row[1])) for row in cur.fetchall()]
@@ -316,7 +326,7 @@ class VectorDB:
                     f"""
                     SELECT {_RETRIEVE_COLS},
                            1 - (embedding <=> %s) AS similarity
-                    FROM chunks
+                    FROM {self.table_name}
                     WHERE collection = %s
                     ORDER BY embedding <=> %s
                     LIMIT %s
@@ -341,7 +351,7 @@ class VectorDB:
                     f"""
                     SELECT {_RETRIEVE_COLS},
                            ts_rank(content_tsv, plainto_tsquery('english', %s)) AS score
-                    FROM chunks
+                    FROM {self.table_name}
                     WHERE collection = %s
                       AND content_tsv @@ plainto_tsquery('english', %s)
                     ORDER BY score DESC
@@ -368,7 +378,7 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
-                    "SELECT COUNT(*) FROM chunks WHERE collection = %s",
+                    f"SELECT COUNT(*) FROM {self.table_name} WHERE collection = %s",
                     (self.collection_name,),
                 )
                 return cur.fetchone()[0]
@@ -378,7 +388,7 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM chunks WHERE collection = %s",
+                    f"DELETE FROM {self.table_name} WHERE collection = %s",
                     (self.collection_name,),
                 )
         logger.info(f"Cleared collection '{self.collection_name}'")
@@ -388,7 +398,7 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM chunks WHERE collection = %s AND source = %s",
+                    f"DELETE FROM {self.table_name} WHERE collection = %s AND source = %s",
                     (self.collection_name, source),
                 )
                 deleted = cur.rowcount
@@ -400,9 +410,9 @@ class VectorDB:
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT source, COUNT(*) AS n
-                    FROM chunks
+                    FROM {self.table_name}
                     WHERE collection = %s AND source IS NOT NULL
                     GROUP BY source
                     ORDER BY source

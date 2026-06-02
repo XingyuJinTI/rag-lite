@@ -208,9 +208,9 @@ def run_evaluation(
         print(f"  Q: {eval_examples[0].question}")
         print(f"  A: {eval_examples[0].answer[:100]}...")
     
-    # Initialize pipeline
+    # Initialize pipeline (from_env so PG_DSN / model settings are honored)
     print("\n--- Initializing RAG Pipeline ---")
-    config = Config.default()
+    config = Config.from_env()
     config.retrieval.use_hybrid_search = use_hybrid
     config.retrieval.use_reranking = use_reranking
     
@@ -294,8 +294,9 @@ def run_evaluation(
                 
                 results = pipeline.retrieve(query, top_n=3)
                 print("\nRetrieved chunks:")
-                for i, (chunk, score) in enumerate(results, 1):
-                    print(f"  {i}. (score: {score:.4f}) {chunk[:150]}...")
+                for i, rc in enumerate(results, 1):
+                    src = f" [{rc.source} p.{rc.page}]" if rc.source else ""
+                    print(f"  {i}. (score: {rc.score:.4f}){src} {rc.content[:150]}...")
                 print()
                 
             except KeyboardInterrupt:
