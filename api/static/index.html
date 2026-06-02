@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG-Lite Console</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #687587;
+      --line: #e2e6eb;
+      --accent: #2f5bd0;
+      --accent-soft: #eaf0fd;
+      --ok: #1f9d6b;
+      --warn: #b9892b;
+      --warn-soft: #fbf3e2;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
+    header {
+      background: #16202e; color: #fff; padding: 12px 22px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    header .brand { font-weight: 600; letter-spacing: .2px; }
+    header .brand b { color: #7fa6ff; }
+    header .sub { color: #9aa7b8; font-size: 12px; }
+    header .spacer { flex: 1; }
+    header .status { font-size: 12px; color: #9aa7b8; display: flex; align-items: center; gap: 6px; }
+    header .dot { width: 8px; height: 8px; border-radius: 50%; background: #57606a; }
+    header .dot.ok { background: #3ddc97; }
+    header .dot.bad { background: #ff6b6b; }
+    header input {
+      background: #0e1722; border: 1px solid #2a3849; color: #cdd6e2;
+      border-radius: 6px; padding: 5px 8px; font-size: 12px; width: 150px;
+    }
+    main { max-width: 1180px; margin: 22px auto; padding: 0 18px; display: grid; grid-template-columns: 1fr 360px; gap: 18px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+    .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .panel .body { padding: 16px; }
+    textarea {
+      width: 100%; min-height: 76px; resize: vertical; padding: 10px 12px;
+      border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 14px;
+    }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 12px; }
+    .controls label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+    .controls input[type=number] { width: 58px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; }
+    .spacer { flex: 1; }
+    button {
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 9px 18px; font-size: 14px; font-weight: 500; cursor: pointer;
+    }
+    button:hover { background: #2547a8; }
+    button:disabled { opacity: .55; cursor: default; }
+    button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; }
+    button.ghost:hover { background: var(--accent-soft); }
+    .answer { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; min-height: 40px; white-space: pre-wrap; }
+    .answer.empty { color: var(--muted); font-style: italic; }
+    .cite { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-size: 12px; font-weight: 600; }
+    .banner { display: none; margin-top: 12px; padding: 9px 12px; border-radius: 8px; font-size: 13px; }
+    .banner.abstain { display: block; background: var(--warn-soft); color: var(--warn); border: 1px solid #ecd9ab; }
+    .banner.error { display: block; background: #fdecec; color: #b3261e; border: 1px solid #f3c4c0; }
+    .sources { margin-top: 18px; }
+    .sources h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 0 0 8px; }
+    .source { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+    .source .meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .source .idx { background: #16202e; color: #fff; font-family: var(--mono); font-size: 11px; border-radius: 4px; padding: 1px 6px; }
+    .source .title { color: var(--ink); font-weight: 600; }
+    .source .score { margin-left: auto; font-family: var(--mono); }
+    .source .text { font-size: 13px; color: #3b4654; }
+    .uploader { border: 1.5px dashed var(--line); border-radius: 8px; padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+    .uploader.drag { border-color: var(--accent); background: var(--accent-soft); }
+    .doc { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .doc:last-child { border-bottom: none; }
+    .doc .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .doc .count { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+    .doc .del { color: #b3261e; border-color: #f3c4c0; }
+    .doc .del:hover { background: #fdecec; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .empty-note { color: var(--muted); font-size: 13px; font-style: italic; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">RAG&#8209;Lite <b>Console</b></div>
+    <div class="sub">internal knowledge assistant</div>
+    <div class="spacer"></div>
+    <input id="apikey" type="password" placeholder="API key (if set)" title="Sent as X-API-Key" />
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">connecting…</span></div>
+  </header>
+
+  <main>
+    <!-- Ask -->
+    <section class="panel">
+      <h2>Ask</h2>
+      <div class="body">
+        <textarea id="q" placeholder="Ask a question about your documents…"></textarea>
+        <div class="controls">
+          <label><input type="checkbox" id="hybrid" checked /> Hybrid search</label>
+          <label><input type="checkbox" id="rerank" checked /> Reranking</label>
+          <label>Top N <input type="number" id="topn" value="3" min="1" max="20" /></label>
+          <span class="spacer"></span>
+          <button id="askBtn">Ask</button>
+        </div>
+
+        <div id="banner" class="banner"></div>
+        <div id="answer" class="answer empty">The answer will appear here, with citation markers linking to sources below.</div>
+
+        <div class="sources" id="sourcesWrap" style="display:none">
+          <h3>Sources</h3>
+          <div id="sources"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Knowledge base -->
+    <section class="panel">
+      <h2>Knowledge base</h2>
+      <div class="body">
+        <div class="uploader" id="uploader">
+          <div><strong>Drop a file</strong> or click to upload</div>
+          <div class="hint">PDF, DOCX, Markdown, or TXT</div>
+          <input type="file" id="file" accept=".pdf,.docx,.md,.txt" style="display:none" />
+        </div>
+        <div class="hint" id="uploadStatus"></div>
+
+        <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:18px 0 4px">Indexed documents</h3>
+        <div id="docs"><div class="empty-note">No documents yet.</div></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const apiKey = () => $("apikey").value.trim();
+    function headers(json) {
+      const h = {};
+      if (json) h["Content-Type"] = "application/json";
+      if (apiKey()) h["X-API-Key"] = apiKey();
+      return h;
+    }
+    const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+    // ---- health ----
+    async function refreshStatus() {
+      try {
+        const r = await fetch("/readyz", { headers: headers() });
+        const d = await r.json();
+        if (r.ok) {
+          $("dot").className = "dot ok";
+          $("statusText").textContent = `ready · ${d.documents} chunks`;
+        } else { throw new Error(); }
+      } catch {
+        $("dot").className = "dot bad";
+        $("statusText").textContent = "unavailable";
+      }
+    }
+
+    // ---- documents ----
+    async function loadDocs() {
+      try {
+        const r = await fetch("/documents", { headers: headers() });
+        const d = await r.json();
+        const el = $("docs");
+        if (!d.sources || d.sources.length === 0) {
+          el.innerHTML = '<div class="empty-note">No documents yet.</div>';
+          return;
+        }
+        el.innerHTML = "";
+        d.sources.forEach((s) => {
+          const row = document.createElement("div");
+          row.className = "doc";
+          row.innerHTML = `<span class="name" title="${esc(s.source)}">${esc(s.source)}</span>
+            <span class="count">${s.chunks}</span>
+            <button class="ghost del">Delete</button>`;
+          row.querySelector(".del").onclick = () => deleteDoc(s.source);
+          el.appendChild(row);
+        });
+      } catch {}
+    }
+
+    async function deleteDoc(source) {
+      if (!confirm(`Delete "${source}" and its chunks?`)) return;
+      await fetch("/documents?source=" + encodeURIComponent(source), { method: "DELETE", headers: headers() });
+      await loadDocs(); await refreshStatus();
+    }
+
+    // ---- upload ----
+    const uploader = $("uploader");
+    uploader.onclick = () => $("file").click();
+    ["dragover", "dragenter"].forEach((e) => uploader.addEventListener(e, (ev) => { ev.preventDefault(); uploader.classList.add("drag"); }));
+    ["dragleave", "drop"].forEach((e) => uploader.addEventListener(e, () => uploader.classList.remove("drag")));
+    uploader.addEventListener("drop", (ev) => { ev.preventDefault(); if (ev.dataTransfer.files[0]) upload(ev.dataTransfer.files[0]); });
+    $("file").onchange = (ev) => { if (ev.target.files[0]) upload(ev.target.files[0]); };
+
+    async function upload(file) {
+      $("uploadStatus").textContent = `Uploading ${file.name}…`;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const r = await fetch("/ingest/file", { method: "POST", headers: headers(), body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "upload failed");
+        $("uploadStatus").textContent = `Indexed ${d.inserted} chunks from ${d.source}.`;
+        await loadDocs(); await refreshStatus();
+      } catch (e) {
+        $("uploadStatus").textContent = "Error: " + e.message;
+      }
+    }
+
+    // ---- ask ----
+    function renderAnswer(text, citations) {
+      // Turn [n] markers into styled badges.
+      const html = esc(text).replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, (m) => `<span class="cite">${m}</span>`);
+      $("answer").className = "answer";
+      $("answer").innerHTML = html || "<em>(empty answer)</em>";
+    }
+
+    function renderSources(sources) {
+      const wrap = $("sourcesWrap"), el = $("sources");
+      if (!sources || sources.length === 0) { wrap.style.display = "none"; return; }
+      wrap.style.display = "block";
+      el.innerHTML = "";
+      sources.forEach((s, i) => {
+        const page = (s.page !== null && s.page !== undefined) ? ` · p.${s.page}` : "";
+        const div = document.createElement("div");
+        div.className = "source";
+        div.innerHTML = `<div class="meta">
+            <span class="idx">[${i + 1}]</span>
+            <span class="title">${esc(s.title || s.source || "untitled")}</span>
+            <span>${esc(s.source || "")}${page}</span>
+            <span class="score">${s.score.toFixed(3)}</span>
+          </div>
+          <div class="text">${esc(s.content.length > 280 ? s.content.slice(0, 280) + "…" : s.content)}</div>`;
+        el.appendChild(div);
+      });
+    }
+
+    async function ask() {
+      const q = $("q").value.trim();
+      if (!q) return;
+      $("banner").className = "banner";
+      $("askBtn").disabled = true; $("askBtn").textContent = "Thinking…";
+      $("answer").className = "answer empty"; $("answer").textContent = "…";
+      try {
+        const r = await fetch("/query", {
+          method: "POST", headers: headers(true),
+          body: JSON.stringify({
+            query: q,
+            use_hybrid_search: $("hybrid").checked,
+            use_reranking: $("rerank").checked,
+            top_n: parseInt($("topn").value, 10) || 3,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+        renderAnswer(d.answer, d.citations);
+        renderSources(d.sources);
+        if (d.abstained) {
+          const b = $("banner"); b.className = "banner abstain";
+          b.textContent = "⚠ The assistant abstained — retrieval was too weak to ground an answer.";
+        }
+      } catch (e) {
+        const b = $("banner"); b.className = "banner error"; b.textContent = "Error: " + e.message;
+        $("answer").className = "answer empty"; $("answer").textContent = "—";
+      } finally {
+        $("askBtn").disabled = false; $("askBtn").textContent = "Ask";
+      }
+    }
+
+    $("askBtn").onclick = ask;
+    $("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
+    $("apikey").addEventListener("change", () => { localStorage.setItem("ragKey", apiKey()); refreshStatus(); loadDocs(); });
+
+    // init
+    $("apikey").value = localStorage.getItem("ragKey") || "";
+    refreshStatus(); loadDocs();
+    setInterval(refreshStatus, 15000);
+  </script>
+</body>
+</html>

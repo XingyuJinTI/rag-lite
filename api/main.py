@@ -24,7 +24,8 @@ from typing import Optional
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from rag_lite.config import Config
 from rag_lite.rag_pipeline import RAGPipeline
@@ -472,3 +473,19 @@ def delete_collection(name: str, pipeline: RAGPipeline = Depends(get_pipeline)) 
         )
     pipeline.vector_db.clear()
     return DeleteResponse(collection=name, deleted=True)
+
+
+# ----------------------------------------------------------------------
+# Test console (static UI)
+# ----------------------------------------------------------------------
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    """Redirect the bare root to the test console."""
+    return RedirectResponse(url="/ui/")
+
+
+# Mounted last so it never shadows the API routes above. Serves the single-page
+# console at /ui (index.html). html=True makes /ui/ resolve to index.html.
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/ui", StaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
