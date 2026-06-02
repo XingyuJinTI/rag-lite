@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 
 from rag_lite.config import Config
 from rag_lite.rag_pipeline import RAGPipeline
+from rag_lite.generation import validate_citations
 from rag_lite.service_settings import ServiceSettings
 from rag_lite.types import IngestChunk, RetrievedChunk
 from rag_lite.loaders import SUPPORTED_EXTENSIONS, UnsupportedFormatError
@@ -265,11 +266,16 @@ def query(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> Q
     except Exception as exc:
         logger.error("Generation failed: %s", exc)
         raise _generation_http_error(exc)
+
+    # Strip any citation markers the model invented that point to non-existent
+    # sources, and report which valid sources were actually cited.
+    answer, citations = validate_citations(answer, len(retrieved))
     return QueryResponse(
         query=req.query,
         answer=answer,
         sources=[_to_chunk(c) for c in retrieved],
         abstained=False,
+        citations=citations,
     )
 
 
@@ -283,9 +289,10 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
     Retrieve context and stream the generated answer as Server-Sent Events.
 
     Event sequence:
-      event: sources  → JSON array of source chunks (with provenance)
-      event: token    → JSON {text} per generated chunk
-      event: done     → empty
+      event: sources   → JSON array of source chunks (with provenance)
+      event: token     → JSON {text} per generated chunk
+      event: citations → JSON {citations: [n,...]} validated indices actually cited
+      event: done      → empty
     """
     retrieved = pipeline.retrieve(
         query=req.query,
@@ -307,8 +314,10 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
             yield "event: done\ndata: {\"abstained\": true}\n\n"
             return
 
+        parts = []
         try:
             for token in pipeline.generate(req.query, retrieved, stream=True):
+                parts.append(token)
                 yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
         except Exception as exc:  # surface generation errors to the client stream
             # Headers are already sent, so we can't change the status code — report
@@ -317,6 +326,11 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
             logger.error("Generation failed mid-stream: %s", detail)
             yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
             return
+
+        # Validate citations against the streamed answer (markers can't be stripped
+        # from already-sent tokens, but we report which sources were validly cited).
+        _, citations = validate_citations("".join(parts), len(retrieved))
+        yield f"event: citations\ndata: {json.dumps({'citations': citations})}\n\n"
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

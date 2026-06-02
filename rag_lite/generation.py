@@ -6,14 +6,54 @@ with retrieved context in a RAG (Retrieval-Augmented Generation) pipeline.
 """
 
 import logging
+import re
 from functools import lru_cache
-from typing import List, Iterator, Union
+from typing import List, Iterator, Tuple, Union
 
 import ollama
 
 from .types import RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+# Matches a citation marker referencing one or more 1-based source indices:
+# [1], [12], or [1, 2]. Used to validate the LLM's inline citations against the
+# sources actually provided.
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def validate_citations(answer: str, num_sources: int) -> Tuple[str, List[int]]:
+    """
+    Validate the inline [n] citation markers in an answer against the available
+    sources, deterministically — independent of whether the LLM behaved.
+
+    The LLM is instructed to cite sources as [n], but a (small) model can emit an
+    index that doesn't exist (e.g. [4] when only 3 sources were given). Such markers
+    are misleading, so we strip out-of-range ones; markers that reference real
+    sources are kept and reported.
+
+    Args:
+        answer: the generated answer text
+        num_sources: number of sources provided (valid indices are 1..num_sources)
+    Returns:
+        (cleaned_answer, cited_indices) — cleaned_answer has invalid markers removed;
+        cited_indices is the sorted, deduplicated set of valid 1-based indices cited.
+    """
+    used: set = set()
+
+    def _replace(match: "re.Match") -> str:
+        nums = [int(x) for x in re.split(r"\s*,\s*", match.group(1))]
+        valid = [n for n in nums if 1 <= n <= num_sources]
+        used.update(valid)
+        if not valid:
+            return ""  # drop a marker that references nothing real
+        return "[" + ", ".join(str(n) for n in valid) + "]"
+
+    cleaned = _CITATION_RE.sub(_replace, answer)
+    # Tidy whitespace/punctuation left behind by removed markers.
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned, sorted(used)
 
 # Default seconds to wait on the LLM. Without a bound, a hung Ollama would pin a
 # server worker thread indefinitely and eventually exhaust the threadpool.

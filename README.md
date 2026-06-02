@@ -271,11 +271,15 @@ token-aware chunking (`CHUNK_MAX_TOKENS`/`CHUNK_OVERLAP`); each chunk keeps its
 
 **Citations & abstention.** The answer cites supporting context inline with bracketed
 markers (`[1]`, `[2]`) whose numbers map to the order of the `sources` array (each with
-`title`/`page`). If retrieval is too weak to ground an answer, the service abstains —
-it returns `"I don't have enough information…"` with `"abstained": true` and **does not
+`title`/`page`). Markers are validated server-side: any pointing to a non-existent
+source are stripped from `answer`, and the response's `citations` field lists the
+1-based source indices actually cited. (Inline markers are model-generated and
+best-effort; the `sources` array itself is always reliable — it comes straight from
+retrieval.) If retrieval is too weak to ground an answer, the service abstains — it
+returns `"I don't have enough information…"` with `"abstained": true` and **does not
 call the LLM**. Abstention is controlled by `ABSTAIN_THRESHOLD` (default `0` = off);
 set it to a positive value, most meaningfully with reranking enabled (cross-encoder
-scores are normalized to `[0,1]`; raw RRF scores are ~`0.01–0.02`).
+scores are sigmoid relevance probabilities in `(0,1)`; raw RRF scores are ~`0.01–0.02`).
 
 > **Upgrading an existing index:** the chunk-id scheme now includes the source, and
 > older rows have no provenance. For clean citations, clear and re-ingest:
