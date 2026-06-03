@@ -21,10 +21,24 @@ logger = logging.getLogger(__name__)
 # Cache one tokenizer per model name, mirroring retrieval._get_cross_encoder.
 _tokenizers: dict = {}
 
-# bge-base max sequence length; chunks must never exceed this.
-MODEL_MAX_TOKENS = 512
+# Absolute ceiling on chunk size regardless of model. Some models report an
+# enormous model_max_length (e.g. 1e30 sentinel); cap to a sane long-context value.
+HARD_MAX_TOKENS = 8192
+# Used when a tokenizer doesn't report a usable model_max_length.
+FALLBACK_MAX_TOKENS = 512
 
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n{2,}")
+# Block separators: blank lines, and the start of a markdown heading or list item —
+# so a bulleted/numbered list or heading isn't glued into one giant "sentence".
+_BLOCK_RE = re.compile(r"\n\s*\n|\n(?=\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s))")
+# Sentence boundary: terminator + whitespace, only when the next token looks like a
+# new sentence start (capital / digit / opening quote-or-paren).
+_SENT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9“\"'(\[])")
+# Tokens ending a fragment that usually do NOT end a sentence (abbreviations/initials).
+_ABBREVIATIONS = {
+    "e.g.", "i.e.", "etc.", "vs.", "cf.", "al.", "approx.", "vol.", "no.", "fig.",
+    "eq.", "inc.", "ltd.", "co.", "dr.", "mr.", "mrs.", "ms.", "st.", "jr.", "sr.",
+}
+_INITIAL_RE = re.compile(r"^[A-Za-z]\.$")  # single-letter initial like "A."
 
 
 def _get_tokenizer(model_name: str):
@@ -36,10 +50,39 @@ def _get_tokenizer(model_name: str):
     return _tokenizers[model_name]
 
 
+def _model_max_tokens(tokenizer) -> int:
+    """The model's usable max sequence length, clamped to a sane range.
+
+    Derived from the tokenizer (bge-base→512, bge-m3→8192) rather than hardcoded, so
+    chunking tracks the active model and a larger CHUNK_MAX_TOKENS can exploit a
+    long-context model instead of being silently capped at 512.
+    """
+    m = getattr(tokenizer, "model_max_length", None)
+    if not isinstance(m, int) or m <= 0 or m > HARD_MAX_TOKENS:
+        return FALLBACK_MAX_TOKENS if not (isinstance(m, int) and m > 0) else HARD_MAX_TOKENS
+    return m
+
+
 def _split_sentences(text: str) -> List[str]:
-    """Split on sentence terminators and blank lines; keep non-empty pieces."""
-    parts = _SENTENCE_RE.split(text.strip())
-    return [p.strip() for p in parts if p and p.strip()]
+    """Split text into sentence-ish units, robust to markdown blocks, abbreviations,
+    and decimals. Whitespace within a block is normalized so hard-wrapped lines join."""
+    out: List[str] = []
+    for block in _BLOCK_RE.split(text.strip()):
+        block = " ".join(block.split())  # collapse internal whitespace/newlines
+        if not block:
+            continue
+        buf = ""
+        for piece in _SENT_RE.split(block):
+            buf = f"{buf} {piece}".strip() if buf else piece
+            tail = buf.split()[-1].lower() if buf.split() else ""
+            # Keep buffering if the boundary was a false positive (abbreviation/initial).
+            if tail in _ABBREVIATIONS or _INITIAL_RE.match(tail):
+                continue
+            out.append(buf)
+            buf = ""
+        if buf.strip():
+            out.append(buf.strip())
+    return out
 
 
 def _token_len(tokenizer, text: str) -> int:
@@ -127,9 +170,9 @@ def chunk_segments(
         max_tokens: target tokens per chunk (capped at the model max)
         overlap: tokens of trailing context carried between consecutive chunks
     """
-    max_tokens = min(max_tokens, MODEL_MAX_TOKENS)
-    overlap = max(0, min(overlap, max_tokens // 2))
     tokenizer = _get_tokenizer(embedding_model)
+    max_tokens = min(max_tokens, _model_max_tokens(tokenizer))
+    overlap = max(0, min(overlap, max_tokens // 2))
 
     chunks: List[IngestChunk] = []
     idx = 0
