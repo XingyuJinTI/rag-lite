@@ -22,18 +22,18 @@ from psycopg.rows import tuple_row
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
-from .types import IngestChunk, RetrievedChunk
+from .types import IngestChunk, Parent, RetrievedChunk
 from .utils import get_device
 
 logger = logging.getLogger(__name__)
 
 # Columns selected for retrieval, in order. Centralized so search/search_fts stay in sync.
-_RETRIEVE_COLS = "chunk_id, content, source, title, uri, page, metadata"
+_RETRIEVE_COLS = "chunk_id, content, source, title, uri, page, parent_id, metadata"
 
 
 def _row_to_retrieved(row: tuple, score: float) -> RetrievedChunk:
     """Build a RetrievedChunk from a row selected with _RETRIEVE_COLS (+ score)."""
-    chunk_id, content, source, title, uri, page, metadata = row
+    chunk_id, content, source, title, uri, page, parent_id, metadata = row
     return RetrievedChunk(
         content=content,
         score=score,
@@ -42,6 +42,7 @@ def _row_to_retrieved(row: tuple, score: float) -> RetrievedChunk:
         title=title,
         uri=uri,
         page=page,
+        parent_id=parent_id,
         metadata=metadata or {},
     )
 
@@ -167,8 +168,23 @@ class VectorDB:
                         ADD COLUMN IF NOT EXISTS uri         TEXT,
                         ADD COLUMN IF NOT EXISTS page        INT,
                         ADD COLUMN IF NOT EXISTS chunk_index INT,
+                        ADD COLUMN IF NOT EXISTS parent_id   TEXT,
                         ADD COLUMN IF NOT EXISTS metadata    JSONB DEFAULT '{{}}'::jsonb,
                         ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT now()
+                """)
+
+                # Parent blocks for small-to-big retrieval (text only, not embedded).
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {t}_parents (
+                        parent_id  TEXT NOT NULL,
+                        collection TEXT NOT NULL,
+                        source     TEXT,
+                        title      TEXT,
+                        uri        TEXT,
+                        page       INT,
+                        content    TEXT NOT NULL,
+                        PRIMARY KEY (parent_id, collection)
+                    )
                 """)
 
                 # HNSW index: fast approximate nearest-neighbour with cosine distance
@@ -272,7 +288,7 @@ class VectorDB:
             rows = [
                 (
                     cid, self.collection_name, c.text, emb,
-                    c.source, c.title, c.uri, c.page, c.chunk_index,
+                    c.source, c.title, c.uri, c.page, c.chunk_index, c.parent_id,
                     json.dumps(c.metadata or {}),
                 )
                 for (cid, c), emb in zip(batch, embeddings)
@@ -284,8 +300,8 @@ class VectorDB:
                         f"""
                         INSERT INTO {self.table_name}
                             (chunk_id, collection, content, embedding,
-                             source, title, uri, page, chunk_index, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             source, title, uri, page, chunk_index, parent_id, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (chunk_id, collection) DO NOTHING
                         """,
                         rows,
@@ -297,6 +313,47 @@ class VectorDB:
                 logger.info(f"Processed {processed}/{total} chunks ({inserted_total} inserted)")
 
         return inserted_total
+
+    def add_parents(self, parents: List[Parent]) -> int:
+        """Store parent blocks (text only, not embedded). Duplicates skipped."""
+        if not parents:
+            return 0
+        rows = [
+            (p.parent_id, self.collection_name, p.source, p.title, p.uri, p.page, p.content)
+            for p in {p.parent_id: p for p in parents}.values()
+        ]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""
+                    INSERT INTO {self.table_name}_parents
+                        (parent_id, collection, source, title, uri, page, content)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (parent_id, collection) DO NOTHING
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    def get_parents(self, parent_ids: List[str]) -> dict:
+        """Fetch parents by id → {parent_id: Parent}. Missing ids are simply absent."""
+        if not parent_ids:
+            return {}
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    f"""
+                    SELECT parent_id, content, source, title, uri, page
+                    FROM {self.table_name}_parents
+                    WHERE collection = %s AND parent_id = ANY(%s)
+                    """,
+                    (self.collection_name, list(parent_ids)),
+                )
+                return {
+                    row[0]: Parent(parent_id=row[0], content=row[1], source=row[2],
+                                   title=row[3], uri=row[4], page=row[5])
+                    for row in cur.fetchall()
+                }
 
     # ------------------------------------------------------------------
     # Read operations
@@ -398,6 +455,10 @@ class VectorDB:
                     f"DELETE FROM {self.table_name} WHERE collection = %s",
                     (self.collection_name,),
                 )
+                cur.execute(
+                    f"DELETE FROM {self.table_name}_parents WHERE collection = %s",
+                    (self.collection_name,),
+                )
         logger.info(f"Cleared collection '{self.collection_name}'")
 
     def delete_by_source(self, source: str) -> int:
@@ -409,6 +470,10 @@ class VectorDB:
                     (self.collection_name, source),
                 )
                 deleted = cur.rowcount
+                cur.execute(
+                    f"DELETE FROM {self.table_name}_parents WHERE collection = %s AND source = %s",
+                    (self.collection_name, source),
+                )
         logger.info(f"Deleted {deleted} chunks for source '{source}'")
         return deleted
 

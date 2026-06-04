@@ -23,7 +23,20 @@ class IngestChunk:
     uri: Optional[str] = None         # path/URL to the original document
     page: Optional[int] = None        # 1-based page number, when applicable
     chunk_index: int = 0              # ordinal of this chunk within its source document
+    parent_id: Optional[str] = None   # id of the larger parent block (small-to-big retrieval)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Parent:
+    """A larger context block, retrieved (not embedded) when a child chunk matches."""
+
+    parent_id: str
+    content: str
+    source: str = "inline"
+    title: Optional[str] = None
+    uri: Optional[str] = None
+    page: Optional[int] = None
 
 
 @dataclass
@@ -37,4 +50,8 @@ class RetrievedChunk:
     title: Optional[str] = None
     uri: Optional[str] = None
     page: Optional[int] = None
+    parent_id: Optional[str] = None
+    # Larger block fed to the LLM for context (the parent), when small-to-big is on.
+    # `content` stays the precise child for citation; generation prefers this if set.
+    context_content: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

@@ -71,6 +71,12 @@ list of the source indices actually cited. Inline `[n]` markers are model-genera
 (best-effort) and validated server-side — out-of-range markers are stripped; the
 `sources` array is always reliable (it comes straight from retrieval).
 
+**Small-to-big retrieval.** Documents are indexed as small **child** chunks (precise
+matching) grouped under larger **parent** blocks. `/query` matches children, then
+expands each hit to its parent section so the LLM answers from coherent context — key
+for long, cross-referencing documents (e.g. contracts). `/search` returns the precise
+children. Toggle with `USE_PARENT_RETRIEVAL`.
+
 **Abstention.** If the top retrieval score is below `ABSTAIN_THRESHOLD` (default `0` =
 off), the service returns "I don't have enough information…" with `"abstained": true`
 and does **not** call the LLM. Most meaningful with reranking on (scores are absolute).
@@ -92,7 +98,9 @@ All via environment variables (or a `.env` file). Most-used:
 | `USE_HYBRID_SEARCH` | `false` | Add tsvector keyword search fused with semantic (RRF) |
 | `USE_RERANKING` | `false` | Cross-encoder rerank (`BAAI/bge-reranker-base`) |
 | `ABSTAIN_THRESHOLD` | `0` | Min top score to answer; `0` disables abstention |
-| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP` | `256` / `48` | Token-aware chunking |
+| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP` | `256` / `48` | Child chunk size / overlap |
+| `USE_PARENT_RETRIEVAL` | `true` | Match on child chunks, answer from the larger parent block |
+| `PARENT_MAX_TOKENS` | `1024` | Parent block size for small-to-big retrieval |
 | `OLLAMA_TIMEOUT` | `60` | Seconds before an LLM call fails (→ 504) |
 | `API_KEY` | _(unset)_ | If set, require `X-API-Key` on every request |
 

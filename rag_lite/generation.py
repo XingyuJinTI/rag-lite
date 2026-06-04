@@ -87,7 +87,10 @@ def format_context(chunks: List[ContextItem]) -> str:
     lines = []
     for i, chunk in enumerate(chunks, start=1):
         if isinstance(chunk, RetrievedChunk):
-            text, label = chunk.content.strip(), _source_label(chunk)
+            # Prefer the expanded parent block (context_content) for the LLM; the
+            # chunk's own content remains the precise, cited passage.
+            text = (chunk.context_content or chunk.content).strip()
+            label = _source_label(chunk)
         else:
             text, label = str(chunk).strip(), ""
         lines.append(f"[{i}]{label} {text}")

@@ -83,19 +83,21 @@ class RAGPipeline:
             Number of chunks inserted
         """
         segments, meta = loaders.load_document(path, uri=uri)
-        chunks = chunking.chunk_segments(
+        children, parents = chunking.chunk_hierarchical(
             segments,
             source=source or meta["source"],
             title=meta["title"],
             uri=meta["uri"],
             embedding_model=self.config.model.embedding_model,
-            max_tokens=self.config.chunking.max_tokens,
-            overlap=self.config.chunking.overlap,
+            parent_max_tokens=self.config.chunking.parent_max_tokens,
+            child_max_tokens=self.config.chunking.max_tokens,
+            child_overlap=self.config.chunking.overlap,
         )
-        if not chunks:
+        if not children:
             logger.warning(f"No text extracted from '{path}'")
             return 0
-        return self.index_documents(chunks, show_progress=True)
+        self.vector_db.add_parents(parents)
+        return self.index_documents(children, show_progress=True)
 
     def retrieve(
         self,
@@ -108,6 +110,7 @@ class RAGPipeline:
         rrf_k: Optional[int] = None,
         rrf_weight: Optional[float] = None,
         reranker_model: Optional[str] = None,
+        expand_parents: Optional[bool] = None,
     ) -> List[RetrievedChunk]:
         """
         Retrieve relevant chunks for a query.
@@ -132,12 +135,16 @@ class RAGPipeline:
         rrf_k = rrf_k if rrf_k is not None else self.config.retrieval.rrf_k
         rrf_weight = rrf_weight if rrf_weight is not None else self.config.retrieval.rrf_weight
         reranker_model = reranker_model if reranker_model is not None else self.config.model.reranker_model
+        expand = expand_parents if expand_parents is not None else self.config.retrieval.use_parent_retrieval
 
-        return retrieve(
+        # When expanding to parents, retrieve extra children so dedup still yields
+        # top_n distinct parents.
+        child_top_n = top_n * 3 if expand else top_n
+        children = retrieve(
             query=query,
             vector_db=self.vector_db,
             language_model=self.config.model.language_model,
-            top_n=top_n,
+            top_n=child_top_n,
             retrieve_k=retrieve_k,
             fusion_k=fusion_k,
             use_hybrid_search=hybrid,
@@ -146,6 +153,36 @@ class RAGPipeline:
             rrf_weight=rrf_weight,
             reranker_model=reranker_model,
         )
+        if not expand:
+            return children[:top_n]
+        return self._expand_to_parents(children, top_n)
+
+    def _expand_to_parents(self, children: List[RetrievedChunk], top_n: int) -> List[RetrievedChunk]:
+        """Dedup children by parent_id and replace content with the parent block.
+
+        Preserves child rank (first/highest-scoring child wins per parent). Children
+        with no parent (or a missing parent) fall back to their own content.
+        """
+        parent_ids = [c.parent_id for c in children if c.parent_id]
+        parents = self.vector_db.get_parents(parent_ids) if parent_ids else {}
+
+        out: List[RetrievedChunk] = []
+        seen = set()
+        for c in children:
+            key = c.parent_id or c.chunk_id
+            if key in seen:
+                continue
+            seen.add(key)
+            p = parents.get(c.parent_id) if c.parent_id else None
+            if p is not None:
+                # Cite the precise child (content/page), but feed the parent to the LLM.
+                c.context_content = p.content
+                out.append(c)
+            else:
+                out.append(c)  # graceful fallback: no parent → use the child
+            if len(out) >= top_n:
+                break
+        return out
 
     def generate(
         self,
