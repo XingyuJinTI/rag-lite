@@ -35,6 +35,8 @@ from rag_lite.types import IngestChunk, RetrievedChunk
 from rag_lite.loaders import SUPPORTED_EXTENSIONS, UnsupportedFormatError
 
 from .schemas import (
+    ChatRequest,
+    ChatResponse,
     Chunk,
     DeleteResponse,
     FileIngestResponse,
@@ -49,6 +51,9 @@ from .schemas import (
     SourceInfo,
     SourceListResponse,
 )
+
+# Cap conversation history fed back into condensation/generation (turns, not exchanges).
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "8"))
 
 
 def _to_chunk(c: RetrievedChunk) -> Chunk:
@@ -336,6 +341,50 @@ def query_stream(req: QueryRequest, pipeline: RAGPipeline = Depends(get_pipeline
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    dependencies=[Depends(require_api_key)],
+    tags=["retrieval"],
+)
+def chat(req: ChatRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> ChatResponse:
+    """
+    Multi-turn QA. The client sends the full conversation in `messages` (stateless);
+    the last message must be the new user turn. The follow-up is condensed with the
+    history into a standalone question for retrieval, then answered with the history
+    in context. Returns the answer, its sources, and the condensed question.
+    """
+    if req.messages[-1].role != "user":
+        raise HTTPException(status_code=400, detail="The last message must be a user turn.")
+    question = req.messages[-1].content
+    history = [(m.role, m.content) for m in req.messages[:-1]][-MAX_HISTORY_TURNS:]
+
+    standalone, retrieved, response = pipeline.chat(
+        history, question, stream=False,
+        top_n=req.top_n, use_hybrid_search=req.use_hybrid_search,
+        use_reranking=req.use_reranking,
+    )
+
+    # Abstain (skip the LLM) when retrieval is too weak. `response` is lazy, so not
+    # consuming it means no generation call happens.
+    if _should_abstain(retrieved, pipeline):
+        return ChatResponse(
+            answer=ABSTAIN_MESSAGE, sources=[_to_chunk(c) for c in retrieved],
+            standalone_question=standalone, abstained=True,
+        )
+    try:
+        answer = "".join(response)
+    except Exception as exc:
+        logger.error("Chat generation failed: %s", exc)
+        raise _generation_http_error(exc)
+
+    answer, citations = validate_citations(answer, len(retrieved))
+    return ChatResponse(
+        answer=answer, sources=[_to_chunk(c) for c in retrieved],
+        standalone_question=standalone, citations=citations, abstained=False,
+    )
 
 
 # ----------------------------------------------------------------------

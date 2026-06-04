@@ -61,6 +61,15 @@
     .answer { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; min-height: 40px; white-space: pre-wrap; }
     .answer.empty { color: var(--muted); font-style: italic; }
     .cite { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-size: 12px; font-weight: 600; }
+    .thread { display: flex; flex-direction: column; gap: 12px; max-height: 460px; overflow-y: auto; padding: 4px; }
+    .msg { max-width: 88%; padding: 10px 13px; border-radius: 12px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
+    .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+    .msg.bot { align-self: flex-start; background: #f1f4f8; color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
+    .msg.bot.abstain { background: var(--warn-soft); border-color: #ecd9ab; }
+    .msg .condensed { display: block; margin-top: 6px; font-size: 11px; color: #cbd5e8; font-style: italic; }
+    .msg.pending { color: var(--muted); font-style: italic; }
+    .composer { display: flex; gap: 8px; margin-top: 14px; }
+    .composer textarea { flex: 1; min-height: 24px; max-height: 140px; resize: none; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 14px; }
     .banner { display: none; margin-top: 12px; padding: 9px 12px; border-radius: 8px; font-size: 13px; }
     .banner.abstain { display: block; background: var(--warn-soft); color: var(--warn); border: 1px solid #ecd9ab; }
     .banner.error { display: block; background: #fdecec; color: #b3261e; border: 1px solid #f3c4c0; }
@@ -94,25 +103,28 @@
   </header>
 
   <main>
-    <!-- Ask -->
+    <!-- Chat -->
     <section class="panel">
-      <h2>Ask</h2>
+      <h2>Chat</h2>
       <div class="body">
-        <textarea id="q" placeholder="Ask a question about your documents…"></textarea>
+        <div id="thread" class="thread">
+          <div class="empty-note">Ask a question about your documents — follow-ups understand the conversation.</div>
+        </div>
+        <div id="banner" class="banner"></div>
+        <div class="sources" id="sourcesWrap" style="display:none">
+          <h3>Sources for last answer</h3>
+          <div id="sources"></div>
+        </div>
+        <div class="composer">
+          <textarea id="q" rows="1" placeholder="Message…  (Enter to send · Shift+Enter for newline)"></textarea>
+          <button id="askBtn">Send</button>
+        </div>
         <div class="controls">
-          <label><input type="checkbox" id="hybrid" checked /> Hybrid search</label>
-          <label><input type="checkbox" id="rerank" checked /> Reranking</label>
+          <label><input type="checkbox" id="hybrid" /> Hybrid</label>
+          <label><input type="checkbox" id="rerank" /> Rerank</label>
           <label>Top N <input type="number" id="topn" value="3" min="1" max="20" /></label>
           <span class="spacer"></span>
-          <button id="askBtn">Ask</button>
-        </div>
-
-        <div id="banner" class="banner"></div>
-        <div id="answer" class="answer empty">The answer will appear here, with citation markers linking to sources below.</div>
-
-        <div class="sources" id="sourcesWrap" style="display:none">
-          <h3>Sources</h3>
-          <div id="sources"></div>
+          <button class="ghost" id="resetBtn">New chat</button>
         </div>
       </div>
     </section>
@@ -212,12 +224,19 @@
       }
     }
 
-    // ---- ask ----
-    function renderAnswer(text, citations) {
-      // Turn [n] markers into styled badges.
-      const html = esc(text).replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, (m) => `<span class="cite">${m}</span>`);
-      $("answer").className = "answer";
-      $("answer").innerHTML = html || "<em>(empty answer)</em>";
+    // ---- chat ----
+    let messages = [];          // conversation history: {role, content}
+    const citeHtml = (t) => esc(t).replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, (m) => `<span class="cite">${m}</span>`);
+
+    function addBubble(role, html, extraClass = "") {
+      const t = $("thread");
+      if (t.querySelector(".empty-note")) t.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = `msg ${role}${extraClass ? " " + extraClass : ""}`;
+      div.innerHTML = html;
+      t.appendChild(div);
+      t.scrollTop = t.scrollHeight;
+      return div;
     }
 
     function renderSources(sources) {
@@ -233,24 +252,27 @@
             <span class="idx">[${i + 1}]</span>
             <span class="title">${esc(s.title || s.source || "untitled")}</span>
             <span>${esc(s.source || "")}${page}</span>
-            <span class="score">${s.score.toFixed(3)}</span>
+            <span class="score">${(s.score ?? 0).toFixed(3)}</span>
           </div>
           <div class="text">${esc(s.content.length > 280 ? s.content.slice(0, 280) + "…" : s.content)}</div>`;
         el.appendChild(div);
       });
     }
 
-    async function ask() {
+    async function send() {
       const q = $("q").value.trim();
       if (!q) return;
+      $("q").value = "";
       $("banner").className = "banner";
-      $("askBtn").disabled = true; $("askBtn").textContent = "Thinking…";
-      $("answer").className = "answer empty"; $("answer").textContent = "…";
+      addBubble("user", esc(q));
+      messages.push({ role: "user", content: q });
+      const pending = addBubble("bot", "thinking…", "pending");
+      $("askBtn").disabled = true;
       try {
-        const r = await fetch("/query", {
+        const r = await fetch("/chat", {
           method: "POST", headers: headers(true),
           body: JSON.stringify({
-            query: q,
+            messages,
             use_hybrid_search: $("hybrid").checked,
             use_reranking: $("rerank").checked,
             top_n: parseInt($("topn").value, 10) || 3,
@@ -258,22 +280,35 @@
         });
         const d = await r.json();
         if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
-        renderAnswer(d.answer, d.citations);
+        let html = citeHtml(d.answer);
+        if (d.standalone_question && d.standalone_question.trim() !== q)
+          html += `<span class="condensed">↳ searched: ${esc(d.standalone_question)}</span>`;
+        pending.className = "msg bot" + (d.abstained ? " abstain" : "");
+        pending.innerHTML = html;
+        messages.push({ role: "assistant", content: d.answer });
         renderSources(d.sources);
-        if (d.abstained) {
-          const b = $("banner"); b.className = "banner abstain";
-          b.textContent = "⚠ The assistant abstained — retrieval was too weak to ground an answer.";
-        }
+        $("thread").scrollTop = $("thread").scrollHeight;
       } catch (e) {
-        const b = $("banner"); b.className = "banner error"; b.textContent = "Error: " + e.message;
-        $("answer").className = "answer empty"; $("answer").textContent = "—";
+        pending.className = "msg bot abstain";
+        pending.textContent = "Error: " + e.message;
+        messages.pop();  // drop the failed user turn so history stays clean
       } finally {
-        $("askBtn").disabled = false; $("askBtn").textContent = "Ask";
+        $("askBtn").disabled = false;
       }
     }
 
-    $("askBtn").onclick = ask;
-    $("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
+    function resetChat() {
+      messages = [];
+      $("thread").innerHTML = '<div class="empty-note">Ask a question about your documents — follow-ups understand the conversation.</div>';
+      $("sourcesWrap").style.display = "none";
+      $("banner").className = "banner";
+    }
+
+    $("askBtn").onclick = send;
+    $("resetBtn").onclick = resetChat;
+    $("q").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    });
     $("apikey").addEventListener("change", () => { localStorage.setItem("ragKey", apiKey()); refreshStatus(); loadDocs(); });
 
     // init

@@ -231,6 +231,9 @@ class RAGPipeline:
         history: List[Tuple[str, str]],
         question: str,
         stream: bool = True,
+        top_n: Optional[int] = None,
+        use_hybrid_search: Optional[bool] = None,
+        use_reranking: Optional[bool] = None,
     ) -> Tuple[str, List[RetrievedChunk], Iterator[str]]:
         """
         Multi-turn RAG: condense the follow-up into a standalone question using the
@@ -247,7 +250,10 @@ class RAGPipeline:
         standalone = condense_question(
             history, question, model, timeout=self.config.model.request_timeout
         )
-        retrieved = self.retrieve(standalone)
+        retrieved = self.retrieve(
+            standalone, top_n=top_n,
+            use_hybrid_search=use_hybrid_search, use_reranking=use_reranking,
+        )
         response = generate_chat_response(
             history, standalone, retrieved, model,
             stream=stream, timeout=self.config.model.request_timeout,
