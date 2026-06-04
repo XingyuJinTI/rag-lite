@@ -59,6 +59,7 @@ curl -X POST localhost:8000/query -H 'Content-Type: application/json' \
 | `POST` | `/search` | Retrieve chunks (no generation) |
 | `POST` | `/query` | Retrieve + generate a cited answer |
 | `POST` | `/query/stream` | Same, streamed as Server-Sent Events |
+| `POST` | `/chat` | Multi-turn QA — send the conversation in `messages`; follow-ups are condensed against the history before retrieval |
 | `POST` | `/ingest` | Index pre-chunked text (`["str", ...]` or `{text, source, title, uri, metadata}`) |
 | `POST` | `/ingest/file` | Upload + parse + chunk a document (PDF / DOCX / MD / TXT) |
 | `GET` | `/documents` | List indexed sources + chunk counts |
@@ -70,6 +71,12 @@ PDFs) `page`. `/query` returns an `answer`, the `sources` it drew on, and a `cit
 list of the source indices actually cited. Inline `[n]` markers are model-generated
 (best-effort) and validated server-side — out-of-range markers are stripped; the
 `sources` array is always reliable (it comes straight from retrieval).
+
+**Multi-turn.** `/chat` is stateless — the client sends the running conversation in
+`messages` (last item = the new user turn). A follow-up like *"and for how long?"* is
+**condensed** with the history into a standalone question before retrieval, and the
+answer is generated with prior turns in context. The response includes the
+`standalone_question` it searched on. The `/ui` console is a chat thread on top of this.
 
 **Small-to-big retrieval.** Documents are indexed as small **child** chunks (precise
 matching) grouped under larger **parent** blocks. `/query` matches children, then

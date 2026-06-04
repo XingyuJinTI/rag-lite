@@ -45,6 +45,30 @@ class QueryResponse(BaseModel):
     citations: List[int] = Field(default_factory=list)
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(..., description='"user" or "assistant"')
+    content: str
+
+
+class ChatRequest(BaseModel):
+    # Full conversation so far; the last message must be the new user turn. Stateless:
+    # the client holds the history and sends it each call.
+    messages: List[ChatMessage] = Field(..., min_length=1)
+    top_n: Optional[int] = Field(None, ge=1, le=100)
+    use_hybrid_search: Optional[bool] = None
+    use_reranking: Optional[bool] = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: List[Chunk]
+    # The standalone question retrieval actually ran on (the follow-up, condensed
+    # with the conversation) — surfaced for transparency.
+    standalone_question: str
+    citations: List[int] = Field(default_factory=list)
+    abstained: bool = False
+
+
 class IngestDocument(BaseModel):
     """A single text chunk to index, with optional provenance."""
     text: str = Field(..., min_length=1)
