@@ -26,7 +26,7 @@ dependency is **Ollama on the host** for answer generation.
 ```bash
 # 1. Start Ollama and pull the generation model (one-time)
 ollama serve
-ollama pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF
+ollama pull qwen2.5:14b   # best reasoning for contract/doc Q&A; use qwen2.5:7b for speed
 
 # 2. Build and run (first build bakes the embedding + reranker models into the image)
 docker compose up --build
@@ -88,7 +88,7 @@ All via environment variables (or a `.env` file). Most-used:
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers embedding model |
 | `EMBEDDING_DIM` | `1024` | Must match the model (bge-m3 → 1024, bge-base → 768) |
 | `TABLE_NAME` | `chunks` | Physical table; dim is fixed per table, so different-dim models need different tables |
-| `LANGUAGE_MODEL` | `hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF` | Ollama model |
+| `LANGUAGE_MODEL` | `qwen2.5:14b` | Ollama model (best doc-QA reasoning; `qwen2.5:7b` ≈½ latency for simple lookups) |
 | `USE_HYBRID_SEARCH` | `false` | Add tsvector keyword search fused with semantic (RRF) |
 | `USE_RERANKING` | `false` | Cross-encoder rerank (`BAAI/bge-reranker-base`) |
 | `ABSTAIN_THRESHOLD` | `0` | Min top score to answer; `0` disables abstention |

@@ -312,14 +312,21 @@ class VectorDB:
                 )
                 return [(row[0], list(row[1])) for row in cur.fetchall()]
 
-    def search(self, query: str, n_results: int = 10) -> List[RetrievedChunk]:
+    def search(self, query: str, n_results: int = 10, source: Optional[str] = None) -> List[RetrievedChunk]:
         """
         Semantic search using pgvector HNSW (cosine).
 
         Returns RetrievedChunks (with provenance) sorted by descending similarity.
         Similarity = 1 - cosine_distance, so 1.0 is identical.
+
+        `source` optionally restricts the search to one source document.
         """
         q_emb = self._embed(query)
+        src_clause = "AND source = %s" if source else ""
+        params = [q_emb, self.collection_name]
+        if source:
+            params.append(source)
+        params += [q_emb, n_results]
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
@@ -327,11 +334,11 @@ class VectorDB:
                     SELECT {_RETRIEVE_COLS},
                            1 - (embedding <=> %s) AS similarity
                     FROM {self.table_name}
-                    WHERE collection = %s
+                    WHERE collection = %s {src_clause}
                     ORDER BY embedding <=> %s
                     LIMIT %s
                     """,
-                    (q_emb, self.collection_name, q_emb, n_results),
+                    params,
                 )
                 return [_row_to_retrieved(row[:-1], float(row[-1])) for row in cur.fetchall()]
 
