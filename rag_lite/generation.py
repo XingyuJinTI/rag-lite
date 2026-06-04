@@ -206,3 +206,85 @@ def generate_response_string(
         timeout=timeout,
     )
     return next(response_gen)
+
+
+# ----------------------------------------------------------------------
+# Multi-turn (conversational) support
+# ----------------------------------------------------------------------
+
+# A turn is (role, text) with role in {"user", "assistant"}.
+Turn = Tuple[str, str]
+
+
+def condense_question(
+    history: List[Turn],
+    question: str,
+    language_model: str,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> str:
+    """
+    Rewrite a follow-up into a standalone question using the conversation.
+
+    A follow-up like "and how do I give it?" is meaningless to a retriever on its
+    own. Condensing (history + follow-up) → a self-contained question is what makes
+    retrieval work across turns. Returns the question unchanged when there's no
+    history or on any failure.
+    """
+    if not history:
+        return question
+    convo = "\n".join(f"{'User' if r == 'user' else 'Assistant'}: {t}" for r, t in history)
+    prompt = (
+        "Given the conversation and a follow-up question, rewrite the follow-up as a "
+        "STANDALONE question that includes any context needed to understand it on its "
+        "own (resolve pronouns and references). If it is already standalone, return it "
+        "unchanged. Output ONLY the standalone question.\n\n"
+        f"Conversation:\n{convo}\n\nFollow-up question: {question}\nStandalone question:"
+    )
+    try:
+        resp = _get_client(timeout).chat(
+            model=language_model, messages=[{"role": "user", "content": prompt}]
+        )
+        rewritten = resp["message"]["content"].strip()
+        return rewritten or question
+    except Exception as e:
+        logger.warning(f"Question condensation failed: {e}; using original question")
+        return question
+
+
+def generate_chat_response(
+    history: List[Turn],
+    question: str,
+    context_chunks: List[ContextItem],
+    language_model: str,
+    stream: bool = True,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> Iterator[str]:
+    """
+    Generate an answer with prior turns in the message history so the model can
+    resolve references and stay coherent, grounded in the retrieved context.
+    """
+    context_text = format_context(context_chunks)
+    system = (
+        "You are a helpful, accurate assistant in a multi-turn conversation. Answer the "
+        "user's latest question using ONLY the context provided in that message, citing "
+        "supporting items inline as [n]. If the context is insufficient, say so."
+    )
+    messages = [{"role": "system", "content": system}]
+    for role, text in history:
+        messages.append({"role": "assistant" if role == "assistant" else "user", "content": text})
+    messages.append({
+        "role": "user",
+        "content": f"Context information:\n{context_text}\n\nQuestion: {question}\n\nAnswer:",
+    })
+    try:
+        resp = _get_client(timeout).chat(model=language_model, messages=messages, stream=stream)
+        if stream:
+            for chunk in resp:
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    yield content
+        else:
+            yield resp["message"]["content"]
+    except Exception as e:
+        logger.error(f"Failed to generate chat response: {e}")
+        raise

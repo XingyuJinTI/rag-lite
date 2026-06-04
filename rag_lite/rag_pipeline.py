@@ -10,7 +10,7 @@ from typing import List, Tuple, Iterator, Optional, Union
 from .config import Config
 from .vector_db import VectorDB
 from .retrieval import retrieve, expand_query
-from .generation import generate_response
+from .generation import generate_response, condense_question, generate_chat_response
 from .types import IngestChunk, RetrievedChunk
 from . import loaders, chunking
 
@@ -225,6 +225,34 @@ class RAGPipeline:
         retrieved = self.retrieve(query)
         response = self.generate(query, retrieved, stream=stream)
         return retrieved, response
+
+    def chat(
+        self,
+        history: List[Tuple[str, str]],
+        question: str,
+        stream: bool = True,
+    ) -> Tuple[str, List[RetrievedChunk], Iterator[str]]:
+        """
+        Multi-turn RAG: condense the follow-up into a standalone question using the
+        conversation, retrieve on that, then answer with the history in context.
+
+        Args:
+            history: prior turns as (role, text), role in {"user", "assistant"}
+            question: the new user question (may reference earlier turns)
+            stream: whether to stream the answer
+        Returns:
+            (standalone_question, retrieved_chunks, response_iterator)
+        """
+        model = self.config.model.language_model
+        standalone = condense_question(
+            history, question, model, timeout=self.config.model.request_timeout
+        )
+        retrieved = self.retrieve(standalone)
+        response = generate_chat_response(
+            history, standalone, retrieved, model,
+            stream=stream, timeout=self.config.model.request_timeout,
+        )
+        return standalone, retrieved, response
 
     def close(self) -> None:
         """Release the underlying connection pool."""
