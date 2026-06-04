@@ -10,11 +10,12 @@ config-driven so they can be swept against the evaluation harness per corpus. Se
 the rationale in the Phase 2 plan / README.
 """
 
+import hashlib
 import logging
 import re
 from typing import List, Optional, Tuple
 
-from .types import IngestChunk
+from .types import IngestChunk, Parent
 
 logger = logging.getLogger(__name__)
 
@@ -195,3 +196,57 @@ def chunk_segments(
 
     logger.info(f"Chunked '{source}' into {len(chunks)} chunks (max_tokens={max_tokens}, overlap={overlap})")
     return chunks
+
+
+def _parent_id(source: str, text: str) -> str:
+    return hashlib.sha256(f"{source}\x00{text}".encode()).hexdigest()[:16]
+
+
+def chunk_hierarchical(
+    segments: List[Tuple[str, Optional[int]]],
+    *,
+    source: str,
+    embedding_model: str,
+    title: Optional[str] = None,
+    uri: Optional[str] = None,
+    parent_max_tokens: int = 1024,
+    child_max_tokens: int = 256,
+    child_overlap: int = 48,
+) -> Tuple[List[IngestChunk], List[Parent]]:
+    """
+    Two-level chunking for small-to-big retrieval.
+
+    Each segment (page) is partitioned into non-overlapping **parent** windows
+    (~parent_max_tokens), and each parent is split into overlapping **child** chunks
+    (~child_max_tokens). Children carry their parent_id. Children are embedded/indexed;
+    parents are returned for separate (text-only) storage and fetched at answer time.
+
+    Returns (children, parents).
+    """
+    tokenizer = _get_tokenizer(embedding_model)
+    model_cap = _model_max_tokens(tokenizer)
+    parent_max = min(parent_max_tokens, max(model_cap, child_max_tokens))
+    child_max = min(child_max_tokens, parent_max)
+    child_overlap = max(0, min(child_overlap, child_max // 2))
+
+    children: List[IngestChunk] = []
+    parents: List[Parent] = []
+    idx = 0
+    for text, page in segments:
+        if not text or not text.strip():
+            continue
+        # Parent windows partition the page (no overlap); a short page = one parent.
+        for parent_text in _pack_text(text, tokenizer, parent_max, overlap=0):
+            pid = _parent_id(source, parent_text)
+            parents.append(Parent(parent_id=pid, content=parent_text, source=source,
+                                  title=title, uri=uri, page=page))
+            for window in _pack_text(parent_text, tokenizer, child_max, child_overlap):
+                children.append(IngestChunk(
+                    text=window, source=source, title=title, uri=uri, page=page,
+                    chunk_index=idx, parent_id=pid, metadata={},
+                ))
+                idx += 1
+
+    logger.info(f"Chunked '{source}' → {len(children)} children / {len(parents)} parents "
+                f"(parent={parent_max}, child={child_max})")
+    return children, parents

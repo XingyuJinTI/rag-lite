@@ -224,12 +224,13 @@ def readyz() -> HealthResponse:
     tags=["retrieval"],
 )
 def search(req: SearchRequest, pipeline: RAGPipeline = Depends(get_pipeline)) -> SearchResponse:
-    """Retrieve relevant chunks without generating an answer."""
+    """Retrieve relevant chunks without generating an answer (precise child passages)."""
     results = pipeline.retrieve(
         query=req.query,
         top_n=req.top_n,
         use_hybrid_search=req.use_hybrid_search,
         use_reranking=req.use_reranking,
+        expand_parents=False,  # /search returns the precise matched passages
     )
     return SearchResponse(
         query=req.query,

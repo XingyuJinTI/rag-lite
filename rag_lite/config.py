@@ -119,6 +119,10 @@ class RetrievalConfig:
     # scores are ~0.01–0.02, so pick a threshold to match the active score scale.
     abstain_threshold: float = 0.0
 
+    # Small-to-big: match on child chunks, then expand each hit to its parent block
+    # for generation. Falls back to the child when no parent exists.
+    use_parent_retrieval: bool = True
+
     @classmethod
     def from_env(cls) -> "RetrievalConfig":
         """Create RetrievalConfig from environment variables."""
@@ -131,14 +135,16 @@ class RetrievalConfig:
             rrf_k=_get_env_int("RRF_K", cls.rrf_k),
             rrf_weight=_get_env_float("RRF_WEIGHT", cls.rrf_weight),
             abstain_threshold=_get_env_float("ABSTAIN_THRESHOLD", cls.abstain_threshold),
+            use_parent_retrieval=_get_env_bool("USE_PARENT_RETRIEVAL", cls.use_parent_retrieval),
         )
 
 
 @dataclass
 class ChunkingConfig:
     """Configuration for token-aware document chunking."""
-    max_tokens: int = 256   # Target tokens per chunk (capped at the model's max, 512)
-    overlap: int = 48       # Tokens of trailing context carried between chunks
+    max_tokens: int = 256          # Target tokens per (child) chunk
+    overlap: int = 48              # Tokens of trailing context carried between chunks
+    parent_max_tokens: int = 1024  # Parent block size for small-to-big retrieval
 
     @classmethod
     def from_env(cls) -> "ChunkingConfig":
@@ -146,6 +152,7 @@ class ChunkingConfig:
         return cls(
             max_tokens=_get_env_int("CHUNK_MAX_TOKENS", cls.max_tokens),
             overlap=_get_env_int("CHUNK_OVERLAP", cls.overlap),
+            parent_max_tokens=_get_env_int("PARENT_MAX_TOKENS", cls.parent_max_tokens),
         )
 
 
