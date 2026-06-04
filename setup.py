@@ -38,6 +38,7 @@ service_requirements = [
     "python-multipart>=0.0.9",
     "pypdf>=4.0.0",
     "python-docx>=1.1.0",
+    "cryptography>=3.1",
 ]
 
 # Optional evaluation requirements

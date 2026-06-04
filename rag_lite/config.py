@@ -57,7 +57,7 @@ class ModelConfig:
     RERANKER_BGE_BASE: str = "BAAI/bge-reranker-base"
     
     embedding_model: str = "BAAI/bge-m3"  # HuggingFace model for sentence-transformers (dense, 1024-d, long-context)
-    language_model: str = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"  # Ollama model for generation
+    language_model: str = "qwen2.5:14b"  # Ollama model for generation (best contract-QA reasoning; use qwen2.5:7b for speed)
     reranker_model: str = RERANKER_BGE_BASE  # Cross-encoder model for reranking
     request_timeout: float = 60.0  # Seconds to wait on the Ollama LLM before giving up
 
