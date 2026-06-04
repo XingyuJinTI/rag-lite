@@ -51,4 +51,7 @@ class RetrievedChunk:
     uri: Optional[str] = None
     page: Optional[int] = None
     parent_id: Optional[str] = None
+    # Larger block fed to the LLM for context (the parent), when small-to-big is on.
+    # `content` stays the precise child for citation; generation prefers this if set.
+    context_content: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

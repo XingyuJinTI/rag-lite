@@ -175,11 +175,9 @@ class RAGPipeline:
             seen.add(key)
             p = parents.get(c.parent_id) if c.parent_id else None
             if p is not None:
-                out.append(RetrievedChunk(
-                    content=p.content, score=c.score, chunk_id=c.chunk_id,
-                    source=p.source, title=p.title, uri=p.uri, page=p.page,
-                    parent_id=c.parent_id, metadata=c.metadata,
-                ))
+                # Cite the precise child (content/page), but feed the parent to the LLM.
+                c.context_content = p.content
+                out.append(c)
             else:
                 out.append(c)  # graceful fallback: no parent → use the child
             if len(out) >= top_n:
