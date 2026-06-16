@@ -136,10 +136,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Browsers reject `Access-Control-Allow-Credentials: true` paired with a wildcard
+# origin, and echoing credentials back to "*" would be unsafe anyway. Auth here is a
+# header-based X-API-Key (not cookies), so credentials aren't needed for the default
+# wildcard; only enable them when origins are explicitly pinned.
+_allow_credentials = settings.cors_origins != ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

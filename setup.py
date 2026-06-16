@@ -47,6 +47,11 @@ eval_requirements = [
     "orjson>=3.9.0",
 ]
 
+# Test requirements (install with pip install -e .[test])
+test_requirements = [
+    "pytest>=7.0",
+]
+
 setup(
     name="rag-lite",
     version="0.1.0",

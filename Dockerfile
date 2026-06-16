@@ -17,6 +17,10 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Test runner — small, in its own cached layer so the suite runs in-image
+# (`docker compose exec api pytest`).
+RUN pip install pytest
+
 # Cache the embedding AND reranker models into the image's HF_HOME so the container
 # runs fully air-gapped at runtime (no HuggingFace access needed). Done BEFORE copying
 # source so editing code doesn't invalidate the (expensive) model layer.
@@ -34,6 +38,7 @@ ENV HF_HUB_OFFLINE=1 \
 # App source (changes here reuse all layers above).
 COPY rag_lite ./rag_lite
 COPY api ./api
+COPY tests ./tests
 COPY main.py setup.py ./
 
 EXPOSE 8000

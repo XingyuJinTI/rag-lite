@@ -399,16 +399,24 @@ class VectorDB:
                 )
                 return [_row_to_retrieved(row[:-1], float(row[-1])) for row in cur.fetchall()]
 
-    def search_fts(self, query: str, n_results: int = 50) -> List[RetrievedChunk]:
+    def search_fts(self, query: str, n_results: int = 50, source: Optional[str] = None) -> List[RetrievedChunk]:
         """
         Full-text search using PostgreSQL tsvector + ts_rank.
 
         Scores are normalized to [0, 1] to match the contract expected by
         the RRF fusion layer.
+
+        `source` optionally restricts the search to one source document (kept
+        symmetric with `search` so hybrid retrieval honours the same filter).
         """
         if not query.strip():
             return []
 
+        src_clause = "AND source = %s" if source else ""
+        params = [query, self.collection_name, query]
+        if source:
+            params.append(source)
+        params.append(n_results)
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
@@ -418,10 +426,11 @@ class VectorDB:
                     FROM {self.table_name}
                     WHERE collection = %s
                       AND content_tsv @@ plainto_tsquery('english', %s)
+                      {src_clause}
                     ORDER BY score DESC
                     LIMIT %s
                     """,
-                    (query, self.collection_name, query, n_results),
+                    params,
                 )
                 results = [_row_to_retrieved(row[:-1], float(row[-1])) for row in cur.fetchall()]
 

@@ -121,6 +121,19 @@ uvicorn api.main:app --reload
 
 A terminal-only CLI (no HTTP) is also available: `python main.py --help`.
 
+## Tests
+
+A focused pytest suite pins the pure-logic invariants that answers depend on —
+citation validation, RRF fusion, the sentence splitter, and token-aware chunking
+(parent/child sizing + overlap). They need no DB, model, or network (a fake
+tokenizer stands in), so they run in well under a second.
+
+```bash
+pip install -e .[test]
+pytest                              # locally
+docker compose exec api pytest      # in the running container
+```
+
 ## Evaluation
 
 Retrieval quality is measured against ground truth with standard IR metrics
